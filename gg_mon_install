@@ -1,0 +1,10 @@
+mkdir -p /opt/oracle/scripts/gg_monitoring
+cd /opt/oracle/scripts/gg_monitoring
+touch alerts.json alert_history.json summary_sent.json
+
+/u01/app/ogg_home1 person1@example.com ORCLDB1
+/u02/app/ogg_home2 person2@example.com ORCLDB2
+
+/opt/oracle/scripts/gg_monitoring/gg_monitor.py
+
+* * * * * /opt/oracle/scripts/gg_monitoring/gg_monitor.py
