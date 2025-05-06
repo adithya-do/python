@@ -4,7 +4,6 @@ import os
 import subprocess
 import json
 import datetime
-import matplotlib.pyplot as plt
 import socket
 
 CONFIG_FILE = "/opt/oracle/scripts/gg_monitoring/ogg_homes.txt"
@@ -21,11 +20,9 @@ for f in [ALERTS_FILE, ALERT_HISTORY_FILE, SUMMARY_SENT_FILE]:
         with open(f, 'w') as fp:
             json.dump({} if 'alerts' in f else [], fp)
 
-# Load active alerts
 with open(ALERTS_FILE) as f:
     active_alerts = json.load(f)
 
-# Load alert history
 with open(ALERT_HISTORY_FILE) as f:
     alert_history = json.load(f)
 
@@ -44,7 +41,6 @@ def parse_ogg_homes():
     return homes
 
 def check_gg_process(ogg_home):
-    ggserrlog = os.path.join(ogg_home, 'ggserr.log')
     try:
         cmd = f"cd {ogg_home} && ./ggsci <<EOF\ninfo all\nEOF"
         output = subprocess.check_output(cmd, shell=True, universal_newlines=True)
@@ -58,7 +54,7 @@ def parse_process_output(output):
     for line in lines:
         if any(state in line for state in ["STOP", "ABEND"]):
             status[line.strip()] = "CRITICAL"
-        elif "RUNNING" not in line:
+        elif "RUNNING" not in line and ("MANAGER" in line or "EXTRACT" in line or "REPLICAT" in line):
             status[line.strip()] = "WARNING"
     return status
 
@@ -111,73 +107,8 @@ def record_daily_summary():
     with open(ALERT_HISTORY_FILE, 'w') as f:
         json.dump(alert_history, f)
 
-def generate_summary_graph():
-    dates = [x['date'] for x in alert_history]
-    counts = [x['count'] for x in alert_history]
-    plt.figure(figsize=(8,4))
-    plt.bar(dates, counts, color='skyblue')
-    for i, v in enumerate(counts):
-        plt.text(i, v + 0.2, str(v), ha='center')
-    plt.title("GoldenGate Alerts Last 7 Days")
-    plt.ylabel("Alert Count")
-    plt.tight_layout()
-    img_file = "/opt/oracle/scripts/gg_monitoring/alerts_summary.png"
-    plt.savefig(img_file)
-    return img_file
-
-def send_daily_summary():
-    img_path = generate_summary_graph()
-    today = datetime.date.today().isoformat()
-    html = f"""
-    <html>
-    <b>GoldenGate Monitoring Summary - {today}</b><br>
-    <img src="cid:alerts_summary.png"><br>
-    <p>Active Alerts:</p>
-    <ul>
-    """
-    for key, alert in active_alerts.items():
-        html += f"<li>{alert['severity']} - {alert['db']} - {alert['process']} - {alert['hostname']}</li>"
-    html += "</ul></html>"
-
-    # Embed image as inline base64 (sendmail doesn't support cid easily)
-    import base64
-    with open(img_path, 'rb') as img_file:
-        img_base64 = base64.b64encode(img_file.read()).decode('utf-8')
-    html = html.replace('<img src="cid:alerts_summary.png">', f'<img src="data:image/png;base64,{img_base64}">')
-
-    send_email(EMAIL_RECIPIENT, f"GoldenGate Monitoring Summary - {today}", html)
-
-def summary_already_sent_today():
-    today = datetime.date.today().isoformat()
-    with open(SUMMARY_SENT_FILE) as f:
-        data = json.load(f)
-    return data.get('date') == today
-
-def mark_summary_sent():
-    today = datetime.date.today().isoformat()
-    with open(SUMMARY_SENT_FILE, 'w') as f:
-        json.dump({'date': today}, f)
-
-# --- MAIN LOOP ---
-
-current_alert_keys = set()
-
-for entry in parse_ogg_homes():
-    ogg_home, contact, db = entry['home'], entry['contact'], entry['db']
-    output = check_gg_process(ogg_home)
-    process_status = parse_process_output(output)
-    triggered = update_alerts(process_status, ogg_home, db, contact)
-    current_alert_keys.update(f"{ogg_home}:{p}" for p in process_status.keys())
-
-cleared_alerts = clear_resolved_alerts(current_alert_keys)
-
-# Save alerts
-with open(ALERTS_FILE, 'w') as f:
-    json.dump(active_alerts, f)
-
-# Check for 4 PM summary
-now = datetime.datetime.now()
-if now.hour == 16 and not summary_already_sent_today():
-    record_daily_summary()
-    send_daily_summary()
-    mark_summary_sent()
+def generate_html_bar(count, max_count):
+    if max_count == 0:
+        return ''
+    width = int((count / max_count) * 200)  # max bar width 200px
+    return f'<div style="background:#4CAF50;width:{width}px;height:15px;display
