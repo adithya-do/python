@@ -42,7 +42,7 @@ def parse_ogg_homes():
 
 def check_gg_process(ogg_home):
     try:
-        cmd = f"cd {ogg_home} && ./ggsci <<EOF\ninfo all\nEOF"
+        cmd = f"cd {ogg_home} && echo 'info all' | ./ggsci"
         output = subprocess.check_output(cmd, shell=True, universal_newlines=True)
         return output
     except Exception as e:
@@ -111,4 +111,54 @@ def generate_html_bar(count, max_count):
     if max_count == 0:
         return ''
     width = int((count / max_count) * 200)  # max bar width 200px
-    return f'<div style="background:#4CAF50;width:{width}px;height:15px;display
+    return f'<div style="background:#4CAF50;width:{width}px;height:15px;display:inline-block;"></div> {count}'
+
+def send_daily_summary():
+    today = datetime.date.today().isoformat()
+    max_count = max((x['count'] for x in alert_history), default=1)
+    html = f"""
+    <html>
+    <b>GoldenGate Monitoring Summary - {today}</b><br><br>
+    <table border="1" cellpadding="4" cellspacing="0">
+    <tr><th>Date</th><th>Alert Count</th><th>Graph</th></tr>
+    """
+    for entry in alert_history:
+        bar = generate_html_bar(entry['count'], max_count)
+        html += f"<tr><td>{entry['date']}</td><td>{entry['count']}</td><td>{bar}</td></tr>"
+    html += "</table><br><p>Active Alerts:</p><ul>"
+    for key, alert in active_alerts.items():
+        html += f"<li>{alert['severity']} - {alert['db']} - {alert['process']} - {alert['hostname']}</li>"
+    html += "</ul></html>"
+    send_email(EMAIL_RECIPIENT, f"GoldenGate Monitoring Summary - {today}", html)
+
+def summary_already_sent_today():
+    today = datetime.date.today().isoformat()
+    with open(SUMMARY_SENT_FILE) as f:
+        data = json.load(f)
+    return data.get('date') == today
+
+def mark_summary_sent():
+    today = datetime.date.today().isoformat()
+    with open(SUMMARY_SENT_FILE, 'w') as f:
+        json.dump({'date': today}, f)
+
+# MAIN LOOP
+current_alert_keys = set()
+
+for entry in parse_ogg_homes():
+    ogg_home, contact, db = entry['home'], entry['contact'], entry['db']
+    output = check_gg_process(ogg_home)
+    process_status = parse_process_output(output)
+    update_alerts(process_status, ogg_home, db, contact)
+    current_alert_keys.update(f"{ogg_home}:{p}" for p in process_status.keys())
+
+clear_resolved_alerts(current_alert_keys)
+
+with open(ALERTS_FILE, 'w') as f:
+    json.dump(active_alerts, f)
+
+now = datetime.datetime.now()
+if now.hour == 16 and not summary_already_sent_today():
+    record_daily_summary()
+    send_daily_summary()
+    mark_summary_sent()
