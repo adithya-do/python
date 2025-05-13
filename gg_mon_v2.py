@@ -51,26 +51,42 @@ def parse_lag_time(lag_str):
     except:
         return timedelta(0)
 
-def parse_status(info_output):
+def parse_info_all(info_output):
     alerts = []
-    for line in info_output.splitlines():
-        if not line.strip().startswith(('EXTRACT', 'REPLICAT')):
+    lines = info_output.strip().splitlines()
+    headers_found = False
+
+    for line in lines:
+        line = line.strip()
+        if not line:
             continue
 
-        parts = re.split(r'\s+', line.strip())
-        if len(parts) < 5:
+        # Detect header to align parsing
+        if not headers_found and 'Lag at Chkpt' in line and 'Time Since Chkpt' in line:
+            headers_found = True
             continue
 
-        proc_type, name, status, lag_str = parts[:4]
-        status = status.upper()
-        lag = parse_lag_time(lag_str)
+        if headers_found and (line.startswith("REPLICAT") or line.startswith("EXTRACT")):
+            parts = re.split(r'\s{2,}', line)
+            if len(parts) < 5:
+                continue
 
-        if status in ['STOPPED', 'ABENDED']:
-            alerts.append(f"<b>{proc_type} {name}</b>: <span style='color:red'>Status: {status}</span>")
-        if lag >= timedelta(minutes=LAG_CRITICAL_MIN):
-            alerts.append(f"<b>{proc_type} {name}</b>: <span style='color:red'>Lag: {lag_str} (Critical)</span>")
-        elif lag >= timedelta(minutes=LAG_WARNING_MIN):
-            alerts.append(f"<b>{proc_type} {name}</b>: <span style='color:orange'>Lag: {lag_str} (Warning)</span>")
+            proc_type = parts[0]
+            status = parts[1].upper()
+            group = parts[2]
+            lag_str = parts[3]
+            lag = parse_lag_time(lag_str)
+
+            # Status alert
+            if status in ["STOPPED", "ABENDED"]:
+                alerts.append(f"<b>{proc_type} {group}</b>: <span style='color:red'>Status: {status}</span>")
+
+            # Lag alerts regardless of status
+            if lag >= timedelta(minutes=LAG_CRITICAL_MIN):
+                alerts.append(f"<b>{proc_type} {group}</b>: <span style='color:red'>Lag at Checkpoint: {lag_str} (Critical)</span>")
+            elif lag >= timedelta(minutes=LAG_WARNING_MIN):
+                alerts.append(f"<b>{proc_type} {group}</b>: <span style='color:orange'>Lag at Checkpoint: {lag_str} (Warning)</span>")
+
     return alerts
 
 def send_email(subject, html_body, to_email):
@@ -123,7 +139,7 @@ def monitor():
         info_output = run_ggsci_command(gg_home, 'info all')
         mgr_output = run_ggsci_command(gg_home, 'info manager')
 
-        alerts = parse_status(info_output)
+        alerts = parse_info_all(info_output)
         if alerts:
             html_report = generate_html_report(db_name, mgr_output, alerts)
             subject = f"[ALERT] GoldenGate issue on {db_name} @ {hostname}"
