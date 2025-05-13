@@ -103,20 +103,47 @@ def parse_info_all(info_output):
 def generate_html_report(db_name, manager_status, alerts):
     style = """
     <style>
-    body { font-family: Arial; }
-    table { border-collapse: collapse; width: 100%%; }
-    th, td { border: 1px solid #ccc; padding: 8px; text-align: center; }
-    th { background-color: #f2f2f2; }
-    .Critical { background-color: #ffdddd; }
-    .Warning { background-color: #fff4cc; }
+    body {
+        font-family: Arial, sans-serif;
+        font-size: 14px;
+        color: #333;
+        padding: 20px;
+    }
+    table {
+        border-collapse: collapse;
+        width: 100%%;
+        margin-top: 20px;
+    }
+    th, td {
+        border: 1px solid #ccc;
+        padding: 10px 14px;
+        text-align: center;
+    }
+    th {
+        background-color: #f2f2f2;
+        font-weight: bold;
+    }
+    tr:hover {
+        background-color: #f9f9f9;
+    }
+    .Critical {
+        background-color: #ffe5e5;
+    }
+    .Warning {
+        background-color: #fff7cc;
+    }
+    h2, h3 {
+        color: #2c3e50;
+    }
     </style>
     """
+
     html = f"<html><head>{style}</head><body>"
     html += f"<h2>GoldenGate Alert Report - {db_name}</h2>"
-    html += "<h3>Manager Status</h3><pre>{}</pre>".format(manager_status.strip())
+    html += f"<h3>Manager Status</h3><pre>{manager_status.strip()}</pre>"
 
     if alerts:
-        html += "<h3>Detected Issues</h3>"
+        html += "<h3>Detected Process Issues</h3>"
         html += """
         <table>
             <tr>
@@ -142,7 +169,7 @@ def generate_html_report(db_name, manager_status, alerts):
             """
         html += "</table>"
     else:
-        html += "<p><strong>All GoldenGate processes are running normally.</strong></p>"
+        html += "<p><strong>No issues detected. All GoldenGate processes are healthy.</strong></p>"
 
     html += "</body></html>"
     return html
