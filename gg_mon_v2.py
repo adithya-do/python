@@ -75,17 +75,26 @@ def parse_info_all(info_output):
             status = parts[1].upper()
             group = parts[2]
             lag_str = parts[3]
+            since_chkpt_str = parts[4]
+
             lag = parse_lag_time(lag_str)
+            since_chkpt = parse_lag_time(since_chkpt_str)
 
             # Status alert
             if status in ["STOPPED", "ABENDED"]:
                 alerts.append(f"<b>{proc_type} {group}</b>: <span style='color:red'>Status: {status}</span>")
 
-            # Lag alerts regardless of status
+            # Lag at Chkpt alert
             if lag >= timedelta(minutes=LAG_CRITICAL_MIN):
                 alerts.append(f"<b>{proc_type} {group}</b>: <span style='color:red'>Lag at Checkpoint: {lag_str} (Critical)</span>")
             elif lag >= timedelta(minutes=LAG_WARNING_MIN):
                 alerts.append(f"<b>{proc_type} {group}</b>: <span style='color:orange'>Lag at Checkpoint: {lag_str} (Warning)</span>")
+
+            # Time Since Chkpt alert
+            if since_chkpt >= timedelta(minutes=LAG_CRITICAL_MIN):
+                alerts.append(f"<b>{proc_type} {group}</b>: <span style='color:red'>Time Since Checkpoint: {since_chkpt_str} (Critical)</span>")
+            elif since_chkpt >= timedelta(minutes=LAG_WARNING_MIN):
+                alerts.append(f"<b>{proc_type} {group}</b>: <span style='color:orange'>Time Since Checkpoint: {since_chkpt_str} (Warning)</span>")
 
     return alerts
 
