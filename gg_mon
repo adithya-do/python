@@ -1,164 +1,91 @@
-#!/usr/bin/env python3
-
-import os
 import subprocess
-import json
-import datetime
-import socket
+import os
 
-CONFIG_FILE = "/opt/oracle/scripts/gg_monitoring/ogg_homes.txt"
-ALERTS_FILE = "/opt/oracle/scripts/gg_monitoring/alerts.json"
-ALERT_HISTORY_FILE = "/opt/oracle/scripts/gg_monitoring/alert_history.json"
-SUMMARY_SENT_FILE = "/opt/oracle/scripts/gg_monitoring/summary_sent.json"
-EMAIL_RECIPIENT = "abc@abc.com"
+CONFIG_FILE = '/opt/oracle/scripts/ogg_mon/ogg.conf'
+SENDMAIL_PATH = '/usr/sbin/sendmail'
 
-HOSTNAME = socket.gethostname()
+def read_config():
+    entries = []
+    with open(CONFIG_FILE, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            parts = line.split('|')
+            if len(parts) == 3:
+                gg_home, db_name, email = parts
+                entries.append({'gg_home': gg_home, 'db_name': db_name, 'email': email})
+    return entries
 
-# Ensure files exist
-for f in [ALERTS_FILE, ALERT_HISTORY_FILE, SUMMARY_SENT_FILE]:
-    if not os.path.exists(f):
-        with open(f, 'w') as fp:
-            json.dump({} if 'alerts' in f else [], fp)
+def run_ggsci_command(gg_home, command):
+    ggsci = os.path.join(gg_home, 'ggsci')
+    try:
+        output = subprocess.check_output(
+            f'echo "{command}" | {ggsci}', 
+            shell=True, stderr=subprocess.STDOUT, text=True
+        )
+        return output
+    except subprocess.CalledProcessError as e:
+        return f"Error executing GGSCI: {e.output}"
 
-with open(ALERTS_FILE) as f:
-    active_alerts = json.load(f)
+def parse_status(output):
+    alerts = []
+    for line in output.splitlines():
+        if line.strip().startswith(('EXTRACT', 'REPLICAT')):
+            if any(bad in line.upper() for bad in ['STOP', 'ABEND', 'LAG']):
+                alerts.append(line)
+    return alerts
 
-with open(ALERT_HISTORY_FILE) as f:
-    alert_history = json.load(f)
+def send_email(subject, html_body, to_email):
+    from_email = "ogg-monitor@example.com"
+    message = f"""From: {from_email}
+To: {to_email}
+Subject: {subject}
+MIME-Version: 1.0
+Content-Type: text/html
 
-def send_email(recipient, subject, html_body):
-    message = f"Subject: {subject}\nContent-Type: text/html\n\n{html_body}"
-    process = subprocess.Popen(['/usr/sbin/sendmail', recipient], stdin=subprocess.PIPE)
+{html_body}
+"""
+    process = subprocess.Popen([SENDMAIL_PATH, "-t", "-oi"], stdin=subprocess.PIPE)
     process.communicate(message.encode())
 
-def parse_ogg_homes():
-    homes = []
-    with open(CONFIG_FILE) as f:
-        for line in f:
-            parts = line.strip().split()
-            if len(parts) >= 3:
-                homes.append({'home': parts[0], 'contact': parts[1], 'db': parts[2]})
-    return homes
-
-def check_gg_process(ogg_home):
-    try:
-        cmd = f"cd {ogg_home} && echo 'info all' | ./ggsci"
-        output = subprocess.check_output(cmd, shell=True, universal_newlines=True)
-        return output
-    except Exception as e:
-        return f"Error running ggsci: {e}"
-
-def parse_process_output(output):
-    lines = output.splitlines()
-    status = {}
-    for line in lines:
-        if any(state in line for state in ["STOP", "ABEND"]):
-            status[line.strip()] = "CRITICAL"
-        elif "RUNNING" not in line and ("MANAGER" in line or "EXTRACT" in line or "REPLICAT" in line):
-            status[line.strip()] = "WARNING"
-    return status
-
-def update_alerts(processes, ogg_home, db_name, contact):
-    global active_alerts
-    now = datetime.datetime.now().isoformat()
-    alerts_triggered = 0
-
-    for proc, severity in processes.items():
-        key = f"{ogg_home}:{proc}"
-        if key not in active_alerts:
-            active_alerts[key] = {
-                'db': db_name,
-                'ogg_home': ogg_home,
-                'contact': contact,
-                'hostname': HOSTNAME,
-                'process': proc,
-                'severity': severity,
-                'first_seen': now
-            }
-            subject = f"[{severity}] GoldenGate Alert: {proc} on {db_name}@{HOSTNAME}"
-            body = f"""
-            <html>
-            <b>Alert: {severity}</b><br>
-            <b>Database:</b> {db_name}<br>
-            <b>Host:</b> {HOSTNAME}<br>
-            <b>Process:</b> {proc}<br>
-            <b>GoldenGate Home:</b> {ogg_home}<br>
-            <b>Time:</b> {now}<br>
-            </html>
-            """
-            send_email(contact, subject, body)
-            alerts_triggered += 1
-    return alerts_triggered
-
-def clear_resolved_alerts(current_keys):
-    cleared = []
-    for key in list(active_alerts.keys()):
-        if key not in current_keys:
-            cleared.append(key)
-            del active_alerts[key]
-    return cleared
-
-def record_daily_summary():
-    today = datetime.date.today().isoformat()
-    count = len(active_alerts)
-    alert_history.append({'date': today, 'count': count})
-    if len(alert_history) > 7:
-        alert_history.pop(0)
-    with open(ALERT_HISTORY_FILE, 'w') as f:
-        json.dump(alert_history, f)
-
-def generate_html_bar(count, max_count):
-    if max_count == 0:
-        return ''
-    width = int((count / max_count) * 200)  # max bar width 200px
-    return f'<div style="background:#4CAF50;width:{width}px;height:15px;display:inline-block;"></div> {count}'
-
-def send_daily_summary():
-    today = datetime.date.today().isoformat()
-    max_count = max((x['count'] for x in alert_history), default=1)
-    html = f"""
-    <html>
-    <b>GoldenGate Monitoring Summary - {today}</b><br><br>
-    <table border="1" cellpadding="4" cellspacing="0">
-    <tr><th>Date</th><th>Alert Count</th><th>Graph</th></tr>
+def generate_html_report(db_name, manager_status, alerts):
+    style = """
+    <style>
+    body { font-family: Arial; }
+    table { border-collapse: collapse; width: 100%%; }
+    th, td { border: 1px solid #ddd; padding: 8px; }
+    th { background-color: #f2f2f2; }
+    </style>
     """
-    for entry in alert_history:
-        bar = generate_html_bar(entry['count'], max_count)
-        html += f"<tr><td>{entry['date']}</td><td>{entry['count']}</td><td>{bar}</td></tr>"
-    html += "</table><br><p>Active Alerts:</p><ul>"
-    for key, alert in active_alerts.items():
-        html += f"<li>{alert['severity']} - {alert['db']} - {alert['process']} - {alert['hostname']}</li>"
-    html += "</ul></html>"
-    send_email(EMAIL_RECIPIENT, f"GoldenGate Monitoring Summary - {today}", html)
+    html = f"<html><head>{style}</head><body>"
+    html += f"<h2>GoldenGate Alert Report - {db_name}</h2>"
+    html += "<h3>Manager Status</h3><pre>{}</pre>".format(manager_status.strip())
+    if alerts:
+        html += "<h3>Alert: Processes Not Running or Lagging</h3><table><tr><th>Process Info</th></tr>"
+        for alert in alerts:
+            html += f"<tr><td>{alert}</td></tr>"
+        html += "</table>"
+    else:
+        html += "<p>All processes are running normally.</p>"
+    html += "</body></html>"
+    return html
 
-def summary_already_sent_today():
-    today = datetime.date.today().isoformat()
-    with open(SUMMARY_SENT_FILE) as f:
-        data = json.load(f)
-    return data.get('date') == today
+def monitor():
+    configs = read_config()
+    for entry in configs:
+        gg_home = entry['gg_home']
+        db_name = entry['db_name']
+        email = entry['email']
 
-def mark_summary_sent():
-    today = datetime.date.today().isoformat()
-    with open(SUMMARY_SENT_FILE, 'w') as f:
-        json.dump({'date': today}, f)
+        info_output = run_ggsci_command(gg_home, 'info all')
+        mgr_output = run_ggsci_command(gg_home, 'info manager')
 
-# MAIN LOOP
-current_alert_keys = set()
+        alerts = parse_status(info_output)
+        if alerts:
+            html = generate_html_report(db_name, mgr_output, alerts)
+            subject = f"[ALERT] GoldenGate issue on {db_name}"
+            send_email(subject, html, email)
 
-for entry in parse_ogg_homes():
-    ogg_home, contact, db = entry['home'], entry['contact'], entry['db']
-    output = check_gg_process(ogg_home)
-    process_status = parse_process_output(output)
-    update_alerts(process_status, ogg_home, db, contact)
-    current_alert_keys.update(f"{ogg_home}:{p}" for p in process_status.keys())
-
-clear_resolved_alerts(current_alert_keys)
-
-with open(ALERTS_FILE, 'w') as f:
-    json.dump(active_alerts, f)
-
-now = datetime.datetime.now()
-if now.hour == 16 and not summary_already_sent_today():
-    record_daily_summary()
-    send_daily_summary()
-    mark_summary_sent()
+if __name__ == '__main__':
+    monitor()
