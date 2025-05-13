@@ -1,8 +1,15 @@
 import subprocess
 import os
+import smtplib
+from email.mime.text import MIMEText
+from email.utils import formataddr
 
+# === CONFIG ===
 CONFIG_FILE = '/opt/oracle/scripts/ogg_mon/ogg.conf'
-SENDMAIL_PATH = '/usr/sbin/sendmail'
+SMTP_SERVER = 'smtp.example.com'  # Replace with your SMTP host
+SMTP_PORT = 25                    # Use 587 for STARTTLS, 465 for SSL if needed
+FROM_EMAIL = 'ogg-monitor@example.com'
+FROM_NAME = 'OGG Monitor'
 
 def read_config():
     entries = []
@@ -14,60 +21,61 @@ def read_config():
             parts = line.split('|')
             if len(parts) == 3:
                 gg_home, db_name, email = parts
-                entries.append({'gg_home': gg_home, 'db_name': db_name, 'email': email})
+                entries.append({'gg_home': gg_home.strip(), 'db_name': db_name.strip(), 'email': email.strip()})
     return entries
 
 def run_ggsci_command(gg_home, command):
     ggsci = os.path.join(gg_home, 'ggsci')
     try:
         output = subprocess.check_output(
-            f'echo "{command}" | {ggsci}', 
+            f'echo "{command}" | {ggsci}',
             shell=True, stderr=subprocess.STDOUT, text=True
         )
         return output
     except subprocess.CalledProcessError as e:
-        return f"Error executing GGSCI: {e.output}"
+        return f"Error executing GGSCI in {gg_home}: {e.output}"
 
-def parse_status(output):
+def parse_status(info_output):
     alerts = []
-    for line in output.splitlines():
-        if line.strip().startswith(('EXTRACT', 'REPLICAT')):
-            if any(bad in line.upper() for bad in ['STOP', 'ABEND', 'LAG']):
-                alerts.append(line)
+    for line in info_output.splitlines():
+        line = line.strip()
+        if line.startswith(('EXTRACT', 'REPLICAT')) and any(bad in line.upper() for bad in ['STOP', 'ABEND', 'LAG']):
+            alerts.append(line)
     return alerts
 
 def send_email(subject, html_body, to_email):
-    from_email = "ogg-monitor@example.com"
-    message = f"""From: {from_email}
-To: {to_email}
-Subject: {subject}
-MIME-Version: 1.0
-Content-Type: text/html
+    msg = MIMEText(html_body, 'html')
+    msg['Subject'] = subject
+    msg['From'] = formataddr((FROM_NAME, FROM_EMAIL))
+    msg['To'] = to_email
 
-{html_body}
-"""
-    process = subprocess.Popen([SENDMAIL_PATH, "-t", "-oi"], stdin=subprocess.PIPE)
-    process.communicate(message.encode())
+    try:
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=10) as server:
+            server.sendmail(FROM_EMAIL, [to_email], msg.as_string())
+    except Exception as e:
+        print(f"[ERROR] Failed to send email to {to_email}: {e}")
 
 def generate_html_report(db_name, manager_status, alerts):
     style = """
     <style>
     body { font-family: Arial; }
     table { border-collapse: collapse; width: 100%%; }
-    th, td { border: 1px solid #ddd; padding: 8px; }
+    th, td { border: 1px solid #ccc; padding: 8px; }
     th { background-color: #f2f2f2; }
     </style>
     """
     html = f"<html><head>{style}</head><body>"
     html += f"<h2>GoldenGate Alert Report - {db_name}</h2>"
     html += "<h3>Manager Status</h3><pre>{}</pre>".format(manager_status.strip())
+
     if alerts:
-        html += "<h3>Alert: Processes Not Running or Lagging</h3><table><tr><th>Process Info</th></tr>"
+        html += "<h3>Issues Detected</h3><table><tr><th>Process Info</th></tr>"
         for alert in alerts:
             html += f"<tr><td>{alert}</td></tr>"
         html += "</table>"
     else:
-        html += "<p>All processes are running normally.</p>"
+        html += "<p><strong>All GoldenGate processes are running normally.</strong></p>"
+
     html += "</body></html>"
     return html
 
@@ -78,14 +86,18 @@ def monitor():
         db_name = entry['db_name']
         email = entry['email']
 
+        print(f"Checking {db_name} at {gg_home}...")
+
         info_output = run_ggsci_command(gg_home, 'info all')
         mgr_output = run_ggsci_command(gg_home, 'info manager')
 
         alerts = parse_status(info_output)
         if alerts:
-            html = generate_html_report(db_name, mgr_output, alerts)
+            html_report = generate_html_report(db_name, mgr_output, alerts)
             subject = f"[ALERT] GoldenGate issue on {db_name}"
-            send_email(subject, html, email)
+            send_email(subject, html_report, email)
+        else:
+            print(f"{db_name}: All processes OK.")
 
 if __name__ == '__main__':
     monitor()
