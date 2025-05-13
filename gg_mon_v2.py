@@ -70,4 +70,66 @@ def parse_status(info_output):
         if lag >= timedelta(minutes=LAG_CRITICAL_MIN):
             alerts.append(f"<b>{proc_type} {name}</b>: <span style='color:red'>Lag: {lag_str} (Critical)</span>")
         elif lag >= timedelta(minutes=LAG_WARNING_MIN):
-            alerts.append(f"<b>{proc_type} {name}</b>: <span style='color_
+            alerts.append(f"<b>{proc_type} {name}</b>: <span style='color:orange'>Lag: {lag_str} (Warning)</span>")
+    return alerts
+
+def send_email(subject, html_body, to_email):
+    msg = MIMEText(html_body, 'html')
+    msg['Subject'] = subject
+    msg['From'] = formataddr((FROM_NAME, FROM_EMAIL))
+    msg['To'] = to_email
+
+    try:
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=10) as server:
+            server.sendmail(FROM_EMAIL, [to_email], msg.as_string())
+    except Exception as e:
+        print(f"[ERROR] Failed to send email to {to_email}: {e}")
+
+def generate_html_report(db_name, manager_status, alerts):
+    style = """
+    <style>
+    body { font-family: Arial; }
+    table { border-collapse: collapse; width: 100%%; }
+    th, td { border: 1px solid #ccc; padding: 8px; }
+    th { background-color: #f2f2f2; }
+    </style>
+    """
+    html = f"<html><head>{style}</head><body>"
+    html += f"<h2>GoldenGate Alert Report - {db_name}</h2>"
+    html += "<h3>Manager Status</h3><pre>{}</pre>".format(manager_status.strip())
+
+    if alerts:
+        html += "<h3>Issues Detected</h3><table><tr><th>Alert</th></tr>"
+        for alert in alerts:
+            html += f"<tr><td>{alert}</td></tr>"
+        html += "</table>"
+    else:
+        html += "<p><strong>All GoldenGate processes are running normally.</strong></p>"
+
+    html += "</body></html>"
+    return html
+
+def monitor():
+    configs = read_config()
+    hostname = socket.gethostname()
+
+    for entry in configs:
+        gg_home = entry['gg_home']
+        db_name = entry['db_name']
+        email = entry['email']
+
+        print(f"[INFO] Checking {db_name} at {gg_home}...")
+
+        info_output = run_ggsci_command(gg_home, 'info all')
+        mgr_output = run_ggsci_command(gg_home, 'info manager')
+
+        alerts = parse_status(info_output)
+        if alerts:
+            html_report = generate_html_report(db_name, mgr_output, alerts)
+            subject = f"[ALERT] GoldenGate issue on {db_name} @ {hostname}"
+            send_email(subject, html_report, email)
+        else:
+            print(f"[OK] {db_name}: All processes healthy.")
+
+if __name__ == '__main__':
+    monitor()
