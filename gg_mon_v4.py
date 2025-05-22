@@ -40,9 +40,15 @@ def run_ggsci_command(gg_home, command):
             f'echo "{command}" | {ggsci}',
             shell=True, stderr=subprocess.STDOUT, text=True
         )
-        return output
+        return output.strip()
     except subprocess.CalledProcessError as e:
-        return f"Error executing GGSCI in {gg_home}: {e.output}"
+        return f"Error executing GGSCI in {gg_home}: {e.output.strip()}"
+
+
+def extract_manager_status(info_output):
+    lines = info_output.splitlines()
+    manager_lines = [line for line in lines if line.strip().startswith("MANAGER")]
+    return '\n'.join(manager_lines) if manager_lines else "MANAGER status not found."
 
 def parse_lag_time(lag_str):
     try:
@@ -198,7 +204,8 @@ def monitor():
         print(f"[INFO] Checking {db_name} at {gg_home}...")
 
         info_output = run_ggsci_command(gg_home, 'info all')
-        mgr_output = run_ggsci_command(gg_home, 'info manager')
+        raw_mgr_output = run_ggsci_command(gg_home, 'info manager')
+        mgr_output = extract_manager_status(raw_mgr_output)
 
         alerts = parse_info_all(info_output)
         if alerts:
