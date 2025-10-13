@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Oracle DB Health GUI Monitor (Treeview edition – no extra deps)
-- Cross-platform Python GUI using Tkinter Treeview only (no tksheet)
+Oracle DB Health GUI Monitor (Treeview edition – no extra deps, f-string safe)
+- Cross-platform Python GUI using Tkinter Treeview only (no external grid)
 - Uses python-oracledb (thick mode recommended) with Oracle Client
 - Monitors multiple databases on a schedule (default: every 5 minutes)
 - Reads/writes a JSON config at: ~/.ora_gui_monitor/config.json
@@ -102,7 +102,7 @@ def save_config(cfg: Dict):
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2)
     except Exception as e:
-        messagebox.showerror(APP_NAME, f"Failed to save config: {e}")
+        messagebox.showerror(APP_NAME, "Failed to save config: {}".format(e))
 
 
 def init_oracle_client_if_needed(cfg: Dict):
@@ -115,8 +115,7 @@ def init_oracle_client_if_needed(cfg: Dict):
             # Already initialized or using thin mode
             pass
         except Exception as e:
-            messagebox.showwarning(APP_NAME, f"Oracle client init issue: {e}
-Proceeding in thin mode if possible.")
+            messagebox.showwarning(APP_NAME, "Oracle client init issue: {}\nProceeding in thin mode if possible.".format(e))
 
 
 def _connect(target: DbTarget):
@@ -171,7 +170,7 @@ def _dt_str(dt: Optional[datetime]) -> str:
 
 
 def _chip(ok: bool) -> str:
-    return "🟩" if ok else "🟥"
+    return "\U0001F7E9" if ok else "\U0001F7E5"  # 🟩 or 🟥 as unicode escapes (safe in any encoding)
 
 
 def check_one(target: DbTarget, timeout_sec: int = 25) -> DbHealth:
@@ -229,7 +228,7 @@ def check_one(target: DbTarget, timeout_sec: int = 25) -> DbHealth:
             elapsed_ms = int((time.time() - t0) * 1000)
             return DbHealth(
                 status="UP",
-                details=f"Log:{log_mode}",
+                details="Log:{}".format(log_mode),
                 version=inst_version,  # from v$instance
                 role=role,
                 open_mode=open_mode,
@@ -332,9 +331,9 @@ class MonitorApp(ttk.Frame):
             save_config(self.cfg)
             try:
                 oracledb.init_oracle_client(lib_dir=d)
-                messagebox.showinfo(APP_NAME, f"Oracle client initialized: {d}")
+                messagebox.showinfo(APP_NAME, "Oracle client initialized: {}".format(d))
             except Exception as e:
-                messagebox.showwarning(APP_NAME, f"Failed to init client: {e}")
+                messagebox.showwarning(APP_NAME, "Failed to init client: {}".format(e))
 
     def _refresh_table(self):
         for i in self.tree.get_children():
@@ -351,7 +350,7 @@ class MonitorApp(ttk.Frame):
         self.interval_sec = self.interval_var.get()
         self._stop_flag.clear()
         self._running = True
-        self.status_var.set(f"Monitoring every {self.interval_sec}s…")
+        self.status_var.set("Monitoring every {}s…".format(self.interval_sec))
         self.after(200, self._loop)
 
     def stop(self):
@@ -380,13 +379,13 @@ class MonitorApp(ttk.Frame):
             except Exception as e:
                 res = DbHealth(status="DOWN", details=str(e), error=str(e))
             self._update_row(t.name, res)
-        self.status_var.set(f"Last run: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        self.status_var.set("Last run: {}".format(datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
 
     def _fmt_sessions(self, h: DbHealth) -> str:
-        return f"{h.sessions_active}/{h.sessions_total}" if h.sessions_total else "-"
+        return "{}/{}".format(h.sessions_active, h.sessions_total) if h.sessions_total else "-"
 
     def _fmt_worst_ts(self, h: DbHealth) -> str:
-        return f"{h.worst_ts_pct_used:.1f}%" if h.worst_ts_pct_used is not None else "-"
+        return "{:.1f}%".format(h.worst_ts_pct_used) if h.worst_ts_pct_used is not None else "-"
 
     def _fmt_backup_cell(self, when: Optional[datetime], arch: bool=False) -> str:
         if not when:
@@ -396,18 +395,24 @@ class MonitorApp(ttk.Frame):
             ok = age_hours <= 12
         else:
             ok = (age_hours/24.0) <= 3
-        return f"{_chip(ok)} {_dt_str(when)}"
+        return "{} {}".format(_chip(ok), _dt_str(when))
 
     def _update_row(self, name: str, h: DbHealth):
+        status_cell = "{} {}".format(_chip(h.status.upper() == "UP"), h.status)
+        inst_cell = "{} {}".format(_chip((h.inst_status or "").upper() == "OPEN"), h.inst_status or "-")
+        open_cell = "{} {}".format(_chip("OPEN" in (h.open_mode or "").upper()), h.open_mode or "-")
+        worst_ok = not (h.worst_ts_pct_used is not None and h.worst_ts_pct_used >= 90.0)
+        worst_cell = "{} {}".format(_chip(worst_ok), self._fmt_worst_ts(h))
+
         vals = (
             name,                           # DB Name
             h.host or "-",                  # Host
-            f"{_chip(h.status.upper()=='UP')} {h.status}",  # Status (chip)
-            f"{_chip((h.inst_status or '').upper()=='OPEN')} {h.inst_status or '-'}",  # Inst_status
+            status_cell,                     # Status (chip)
+            inst_cell,                       # Inst_status
             h.role or "-",                  # Role
-            f"{_chip('OPEN' in (h.open_mode or '').upper())} {h.open_mode or '-'}",     # OpenMode
+            open_cell,                       # OpenMode
             self._fmt_sessions(h),           # Sessions
-            f"{_chip(not (h.worst_ts_pct_used is not None and h.worst_ts_pct_used >= 90.0))} {self._fmt_worst_ts(h)}",  # WorstTS%
+            worst_cell,                      # WorstTS%
             self._fmt_backup_cell(h.last_full_inc_backup, arch=False),   # LastFull/Inc
             self._fmt_backup_cell(h.last_arch_backup, arch=True),        # LastArch
             h.version or "-",               # DB Version
@@ -493,7 +498,7 @@ class MonitorApp(ttk.Frame):
             self._refresh_table()
             messagebox.showinfo(APP_NAME, "Imported configuration.")
         except Exception as e:
-            messagebox.showerror(APP_NAME, f"Failed to import: {e}")
+            messagebox.showerror(APP_NAME, "Failed to import: {}".format(e))
 
     def _export_json(self):
         p = filedialog.asksaveasfilename(title="Export config.json", defaultextension=".json", initialfile="config.json")
@@ -509,7 +514,7 @@ class MonitorApp(ttk.Frame):
                 json.dump(export, f, indent=2)
             messagebox.showinfo(APP_NAME, "Exported configuration.")
         except Exception as e:
-            messagebox.showerror(APP_NAME, f"Failed to export: {e}")
+            messagebox.showerror(APP_NAME, "Failed to export: {}".format(e))
 
 
 class DbEditor(tk.Toplevel):
