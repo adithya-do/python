@@ -8,22 +8,22 @@ Oracle DB Health GUI Monitor (Enhanced, per-cell coloring)
 - Supports TNS aliases (sqlnet.ora/tnsnames.ora) or EZConnect strings
 - Color-coded health results with per-cell background for key metrics
 - Shows last Datafile FULL/INCREMENTAL backup and last ARCHIVELOG backup timestamps
-  • ARCH backup older than 12 hours => red background, else green
-  • FULL/INC backup older than 3 days => red background, else green
+  * ARCH backup older than 12 hours => red background, else green
+  * FULL/INC backup older than 3 days => red background, else green
 - Column order per request; DB Version now from v$instance.version (includes patch level)
 - Error column shows connectivity errors; "TNS Alias" label in Add DB window
 
 Prereqs
 -------
-python -m pip install python-oracledb tksheet
+Run:
+    pip install python-oracledb tksheet
 
-You must have Oracle Client installed and accessible (e.g., Instant Client)
-Set the location via ORACLE_CLIENT_LIB_DIR env var or edit ORACLE_CLIENT_LIB_DIR below.
+You must have Oracle Client installed and accessible (e.g., Instant Client).
+Set the location via ORACLE_CLIENT_LIB_DIR env var or pick it in the app.
 
 Run
 ---
-python oracle_db_health_gui.py
-
+    python oracle_db_health_gui.py
 """
 import json
 import os
@@ -44,7 +44,7 @@ from tkinter import ttk, messagebox, filedialog
 try:
     from tksheet import Sheet
 except Exception as e:
-    message = (
+    _msg = (
         "Missing dependency: tksheet
 
 "
@@ -53,7 +53,7 @@ except Exception as e:
 "
         f"Error: {e}"
     )
-    raise SystemExit(message)
+    raise SystemExit(_msg)
 
 # Oracle
 import oracledb
