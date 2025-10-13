@@ -97,7 +97,8 @@ def init_oracle_client_if_needed(cfg: Dict):
         except oracledb.ProgrammingError:
             pass
         except Exception as e:
-            messagebox.showwarning(APP_NAME, "Oracle client init issue: {}\nProceeding in thin mode if possible.".format(e))
+            messagebox.showwarning(APP_NAME, "Oracle client init issue: {}
+Proceeding in thin mode if possible.".format(e))
 
 
 def _connect(target: DbTarget):
@@ -114,27 +115,60 @@ def _connect(target: DbTarget):
 
 
 SQLS = {
-    "db": "SELECT name, open_mode, database_role, log_mode FROM v$database",
-    "inst": "SELECT instance_name, status, host_name, version, startup_time FROM v$instance",
+    "db": (
+        """
+        SELECT name, open_mode, database_role, log_mode
+        FROM v$database
+        """
+    ),
+    "inst": (
+        """
+        SELECT instance_name, status, host_name, version, startup_time
+        FROM v$instance
+        """
+    ),
     "sess": (
-        "SELECT COUNT(*) total, SUM(CASE WHEN status='ACTIVE' THEN 1 ELSE 0 END) active "
-        "FROM v$session WHERE type='USER'"
+        """
+        SELECT COUNT(*) total,
+               SUM(CASE WHEN status='ACTIVE' THEN 1 ELSE 0 END) active
+        FROM v$session
+        WHERE type='USER'
+        """
     ),
     "tspace": (
-        "SELECT ts.tablespace_name, ROUND((1 - NVL(fs.free_mb,0)/ts.size_mb)*100,2) pct_used "
-        "FROM (SELECT tablespace_name, SUM(bytes)/1024/1024 size_mb FROM dba_data_files GROUP BY tablespace_name) ts "
-        "LEFT JOIN (SELECT tablespace_name, SUM(bytes)/1024/1024 free_mb FROM dba_free_space GROUP BY tablespace_name) fs "
-        "ON ts.tablespace_name=fs.tablespace_name"
+        """
+        SELECT ts.tablespace_name,
+               ROUND((1 - NVL(fs.free_mb,0)/ts.size_mb)*100,2) pct_used
+        FROM (
+            SELECT tablespace_name, SUM(bytes)/1024/1024 size_mb
+            FROM dba_data_files
+            GROUP BY tablespace_name
+        ) ts
+        LEFT JOIN (
+            SELECT tablespace_name, SUM(bytes)/1024/1024 free_mb
+            FROM dba_free_space
+            GROUP BY tablespace_name
+        ) fs
+        ON ts.tablespace_name = fs.tablespace_name
+        """
     ),
     "bk_data": (
-        "SELECT MAX(bp.completion_time) "
-        "FROM v$backup_set bs JOIN v$backup_piece bp ON bs.set_stamp=bp.set_stamp AND bs.set_count=bp.set_count "
-        "WHERE bs.backup_type='D'"
+        """
+        SELECT MAX(bp.completion_time)
+        FROM v$backup_set bs
+        JOIN v$backup_piece bp
+          ON bs.set_stamp = bp.set_stamp AND bs.set_count = bp.set_count
+        WHERE bs.backup_type = 'D'
+        """
     ),
     "bk_arch": (
-        "SELECT MAX(bp.completion_time) "
-        "FROM v$backup_set bs JOIN v$backup_piece bp ON bs.set_stamp=bp.set_stamp AND bs.set_count=bp.set_count "
-        "WHERE bs.backup_type='L'"
+        """
+        SELECT MAX(bp.completion_time)
+        FROM v$backup_set bs
+        JOIN v$backup_piece bp
+          ON bs.set_stamp = bp.set_stamp AND bs.set_count = bp.set_count
+        WHERE bs.backup_type = 'L'
+        """
     ),
 }
 
