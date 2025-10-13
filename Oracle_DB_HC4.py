@@ -1,25 +1,24 @@
 #!/usr/bin/env python3
 """
-Oracle DB Health GUI Monitor (tksheet grid, per-cell colors)
-- Tkinter + tksheet to allow PER-CELL styling (red/green on specific fields only)
+Oracle DB Health GUI Monitor (tksheet grid, per-cell red/green bold text)
+- Tkinter + tksheet to allow PER-CELL styling
 - Uses python-oracledb with Oracle Client (thick recommended)
 - Checks every N seconds (default 300)
 - Config: ~/.ora_gui_monitor/config.json
 - Columns (order fixed):
-  DB Name, Host, Status, Inst_status, Role, OpenMode, Sessions, WorstTS%, LastFull/Inc, LastArch, DB Version, Ms, LastChecked, Error
-- Coloring rules (per cell):
+  DB Name, Host, Status, Inst_status, Role, OpenMode, Sessions, WorstTS%,
+  LastFull/Inc, LastArch, DB Version, Ms, LastChecked, Error
+- Coloring rules (per cell, text only):
   * Status: GREEN if UP else RED (bold)
   * Inst_status: GREEN if OPEN else RED (bold)
   * OpenMode: GREEN if contains OPEN else RED (bold)
   * WorstTS%: RED if >= 90.0 else GREEN (bold)
-  * LastArch: RED if older than 12 hours; GREEN otherwise (bold)
-  * LastFull/Inc: RED if older than 3 days; GREEN otherwise (bold)
-
+  * LastArch: RED if older than 12 hours; GREEN otherwise (bold; missing value = RED)
+  * LastFull/Inc: RED if older than 3 days; GREEN otherwise (bold; missing value = RED)
 Install once:
     pip install python-oracledb tksheet
-
 Run:
-    python oracle_db_health_gui.py
+    python oracle_db_health_gui_tksheet.py
 """
 import json
 import os
@@ -88,7 +87,6 @@ class DbHealth:
     error: str = ""
     ts: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
-
 def load_config() -> Dict:
     if CONFIG_PATH.exists():
         try:
@@ -98,14 +96,12 @@ def load_config() -> Dict:
             pass
     return {"interval_sec": DEFAULT_INTERVAL_SEC, "targets": [], "client_lib_dir": ORACLE_CLIENT_LIB_DIR or ""}
 
-
 def save_config(cfg: Dict):
     try:
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2)
     except Exception as e:
         messagebox.showerror(APP_NAME, "Failed to save config: {}".format(e))
-
 
 def init_oracle_client_if_needed(cfg: Dict):
     if oracledb is None:
@@ -118,7 +114,6 @@ def init_oracle_client_if_needed(cfg: Dict):
             pass
         except Exception as e:
             messagebox.showwarning(APP_NAME, "Oracle client init issue: {}\nProceeding in thin mode if possible.".format(e))
-
 
 def _connect(target: DbTarget):
     if oracledb is None:
@@ -192,10 +187,8 @@ SQLS = {
     ),
 }
 
-
 def _dt_str(dt: Optional[datetime]) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S") if dt else "-"
-
 
 def check_one(target: DbTarget, timeout_sec: int = 25) -> DbHealth:
     t0 = time.time()
@@ -212,7 +205,7 @@ def check_one(target: DbTarget, timeout_sec: int = 25) -> DbHealth:
 
             sessions_total, sessions_active = 0, 0
             try:
-                cur.execute(SQLS["sess"]) 
+                cur.execute(SQLS["sess"])
                 total, active = cur.fetchone()
                 sessions_total = int(total or 0)
                 sessions_active = int(active or 0)
@@ -221,7 +214,7 @@ def check_one(target: DbTarget, timeout_sec: int = 25) -> DbHealth:
 
             worst_pct = None
             try:
-                cur.execute(SQLS["tspace"]) 
+                cur.execute(SQLS["tspace"])
                 worst_pct = 0.0
                 for ts_name, pct_used in cur.fetchall():
                     if pct_used is not None and pct_used > (worst_pct or 0):
@@ -232,13 +225,13 @@ def check_one(target: DbTarget, timeout_sec: int = 25) -> DbHealth:
             last_df = None
             last_arch = None
             try:
-                cur.execute(SQLS["bk_data"]) 
+                cur.execute(SQLS["bk_data"])
                 r = cur.fetchone()
                 last_df = r[0] if r else None
             except Exception:
                 last_df = None
             try:
-                cur.execute(SQLS["bk_arch"]) 
+                cur.execute(SQLS["bk_arch"])
                 r = cur.fetchone()
                 last_arch = r[0] if r else None
             except Exception:
@@ -269,7 +262,6 @@ def check_one(target: DbTarget, timeout_sec: int = 25) -> DbHealth:
             elapsed_ms=elapsed_ms,
             error=str(e),
         )
-
 
 class MonitorApp(ttk.Frame):
     COLS = [
@@ -316,7 +308,7 @@ class MonitorApp(ttk.Frame):
         ttk.Entry(topbar, textvariable=self.client_dir_var, width=28).pack(side=tk.LEFT, padx=4)
         ttk.Button(topbar, text="Browse", command=self._pick_client_dir).pack(side=tk.LEFT)
 
-        # Fonts for cell emphasis
+        # Fonts for emphasis
         try:
             base_font = tkfont.nametofont("TkDefaultFont")
             self.bold_font = base_font.copy()
@@ -324,7 +316,7 @@ class MonitorApp(ttk.Frame):
         except Exception:
             self.bold_font = None
 
-        # Sheet
+        # Sheet grid
         self.sheet = Sheet(self, headers=self.COLS)
         self.sheet.enable_bindings((
             "single_select",
@@ -364,7 +356,7 @@ class MonitorApp(ttk.Frame):
         self.sheet.set_sheet_data(data, reset_col_positions=True, reset_row_positions=True)
         self.sheet.refresh()
 
-    # --- Monitoring ---
+    # Monitoring
     def start(self):
         if self._running:
             return
@@ -413,7 +405,7 @@ class MonitorApp(ttk.Frame):
         self.sheet.highlight_cells(row=row, column=col, fg=fg, font=font, redraw=False)
 
     def _update_row(self, row: int, h: DbHealth):
-        # Fill basic values first
+        # Fill basic values
         self._set_cell(row, "DB Name", self.targets[row].name)
         self._set_cell(row, "Host", h.host or "-")
         self._set_cell(row, "Status", h.status)
@@ -429,7 +421,7 @@ class MonitorApp(ttk.Frame):
         self._set_cell(row, "LastChecked", h.ts)
         self._set_cell(row, "Error", h.error or ("" if h.status=="UP" else h.details))
 
-        # Apply per-cell coloring rules
+        # Apply per-cell coloring rules (bold red or green)
         self._color_cell(row, "Status", h.status.upper() == "UP")
         self._color_cell(row, "Inst_status", (h.inst_status or "").upper() == "OPEN")
         self._color_cell(row, "OpenMode", "OPEN" in (h.open_mode or "").upper())
@@ -450,7 +442,7 @@ class MonitorApp(ttk.Frame):
 
         self.sheet.refresh()
 
-    # --- CRUD on targets ---
+    # CRUD
     def _add_dialog(self):
         DbEditor(self, on_save=self._add_target)
 
@@ -527,7 +519,6 @@ class MonitorApp(ttk.Frame):
         except Exception as e:
             messagebox.showerror(APP_NAME, "Failed to export: {}".format(e))
 
-
 class DbEditor(tk.Toplevel):
     def __init__(self, parent: "MonitorApp", target: Optional[DbTarget] = None, on_save=None):
         super().__init__(parent)
@@ -601,7 +592,6 @@ class DbEditor(tk.Toplevel):
             self.on_save(t)
         self.destroy()
 
-
 def main():
     cfg = load_config()
     root = tk.Tk()
@@ -616,17 +606,5 @@ def main():
     root.geometry("1700x650")
     root.mainloop()
 
-
 if __name__ == "__main__":
     main()
-""")
-
-print("Saved to:", str(code_path))
-
-# Show lines ~90-110 for reference
-text = code_path.read_text()
-lines = text.splitlines()
-start = max(0, 90)
-end = min(len(lines), 110)
-for i in range(start, end):
-    print(f"{i+1:4d}: ", lines[i])
