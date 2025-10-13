@@ -1,29 +1,14 @@
 #!/usr/bin/env python3
 """
-Oracle DB Health GUI Monitor (Treeview edition – no extra deps, f-string safe)
-- Cross-platform Python GUI using Tkinter Treeview only (no external grid)
+Oracle DB Health GUI Monitor (Treeview edition, ASCII-safe)
+- Pure Tkinter Treeview (no third-party deps)
 - Uses python-oracledb (thick mode recommended) with Oracle Client
 - Monitors multiple databases on a schedule (default: every 5 minutes)
-- Reads/writes a JSON config at: ~/.ora_gui_monitor/config.json
+- Config file: ~/.ora_gui_monitor/config.json
 - Supports TNS aliases (sqlnet.ora/tnsnames.ora) or EZConnect strings
-- Emulated per-cell status using compact chips (🟩/🟥) since Treeview can't color individual cells
-- Shows last Datafile FULL/INCREMENTAL backup and last ARCHIVELOG backup timestamps
-  * ARCH backup older than 12 hours => 🟥, else 🟩
-  * FULL/INC backup older than 3 days => 🟥, else 🟩
-- Column order per request; DB Version from v$instance.version
-- Error column shows connectivity errors; "TNS Alias / EZConnect" label in Add DB window
-
-Prereqs
--------
-Run:
-    pip install python-oracledb
-
-You must have Oracle Client installed and accessible (e.g., Instant Client).
-Set the location via ORACLE_CLIENT_LIB_DIR env var or pick it in the app.
-
-Run
----
-    python oracle_db_health_gui.py
+- Row-level coloring: bold green for healthy, bold red for issues
+- Backup rules: ARCH older than 12 hours is RED; FULL/INC older than 3 days is RED
+- DB Version comes from v$instance.version
 """
 import json
 import os
@@ -61,7 +46,7 @@ class DbTarget:
     user: Optional[str] = None
     password: Optional[str] = None
     wallet_dir: Optional[str] = None  # Optional: for mTLS / TCPS wallet
-    mode: str = "thin"  # "thick" or "thin"; thick recommended if using full client
+    mode: str = "thin"  # "thick" or "thin"
 
 @dataclass
 class DbHealth:
@@ -89,7 +74,6 @@ def load_config() -> Dict:
                 return json.load(f)
         except Exception:
             pass
-    # default skeleton
     return {
         "interval_sec": DEFAULT_INTERVAL_SEC,
         "targets": [],
@@ -107,57 +91,46 @@ def save_config(cfg: Dict):
 
 def init_oracle_client_if_needed(cfg: Dict):
     lib_dir = cfg.get("client_lib_dir") or ORACLE_CLIENT_LIB_DIR
-    # Use thick mode init only if a lib_dir is provided
     if lib_dir:
         try:
             oracledb.init_oracle_client(lib_dir=lib_dir)
         except oracledb.ProgrammingError:
-            # Already initialized or using thin mode
             pass
         except Exception as e:
-            messagebox.showwarning(APP_NAME, "Oracle client init issue: {}
-Proceeding in thin mode if possible.".format(e))
+            messagebox.showwarning(APP_NAME, "Oracle client init issue: {}\nProceeding in thin mode if possible.".format(e))
 
 
 def _connect(target: DbTarget):
-    # Prefer thick mode if requested and client libs available
     if target.mode.lower() == "thick" and ORACLE_CLIENT_LIB_DIR:
         try:
             oracledb.init_oracle_client(lib_dir=ORACLE_CLIENT_LIB_DIR)
         except Exception:
             pass
-    # Wallet-based (TCPS) connection if wallet_dir provided
     if target.wallet_dir:
         return oracledb.connect(config_dir=target.wallet_dir, dsn=target.dsn)
-    # Username/password
     if target.user and target.password:
         return oracledb.connect(user=target.user, password=target.password, dsn=target.dsn)
-    # Otherwise attempt external authentication (OS auth) if configured
     return oracledb.connect(dsn=target.dsn)
 
 
 SQLS = {
     "db": "SELECT name, open_mode, database_role, log_mode FROM v$database",
-    # Use version from v$instance per request
     "inst": "SELECT instance_name, status, host_name, version, startup_time FROM v$instance",
     "sess": (
         "SELECT COUNT(*) total, SUM(CASE WHEN status='ACTIVE' THEN 1 ELSE 0 END) active "
         "FROM v$session WHERE type='USER'"
     ),
-    # Worst tablespace percentage used
     "tspace": (
         "SELECT ts.tablespace_name, ROUND((1 - NVL(fs.free_mb,0)/ts.size_mb)*100,2) pct_used "
         "FROM (SELECT tablespace_name, SUM(bytes)/1024/1024 size_mb FROM dba_data_files GROUP BY tablespace_name) ts "
         "LEFT JOIN (SELECT tablespace_name, SUM(bytes)/1024/1024 free_mb FROM dba_free_space GROUP BY tablespace_name) fs "
         "ON ts.tablespace_name=fs.tablespace_name"
     ),
-    # Last Datafile FULL or INCREMENTAL backup completion time (no catalog required)
     "bk_data": (
         "SELECT MAX(bp.completion_time) "
         "FROM v$backup_set bs JOIN v$backup_piece bp ON bs.set_stamp=bp.set_stamp AND bs.set_count=bp.set_count "
         "WHERE bs.backup_type='D'"
     ),
-    # Last ARCHIVELOG backup completion time
     "bk_arch": (
         "SELECT MAX(bp.completion_time) "
         "FROM v$backup_set bs JOIN v$backup_piece bp ON bs.set_stamp=bp.set_stamp AND bs.set_count=bp.set_count "
@@ -170,7 +143,6 @@ def _dt_str(dt: Optional[datetime]) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S") if dt else "-"
 
 
-def 
 def check_one(target: DbTarget, timeout_sec: int = 25) -> DbHealth:
     t0 = time.time()
     try:
@@ -178,15 +150,12 @@ def check_one(target: DbTarget, timeout_sec: int = 25) -> DbHealth:
             conn.call_timeout = timeout_sec * 1000
             cur = conn.cursor()
 
-            # DB
-            cur.execute(SQLS["db"])
+            cur.execute(SQLS["db"])  # name, open_mode, role, log_mode
             name, open_mode, role, log_mode = cur.fetchone()
 
-            # Instance (includes version from v$instance)
-            cur.execute(SQLS["inst"]) 
+            cur.execute(SQLS["inst"])  # inst_name, inst_status, host_name, version, startup_time
             inst_name, inst_status, host_name, inst_version, startup_time = cur.fetchone()
 
-            # Sessions
             sessions_total, sessions_active = 0, 0
             try:
                 cur.execute(SQLS["sess"]) 
@@ -196,7 +165,6 @@ def check_one(target: DbTarget, timeout_sec: int = 25) -> DbHealth:
             except Exception:
                 pass
 
-            # Tablespaces worst usage
             worst_pct = None
             try:
                 cur.execute(SQLS["tspace"]) 
@@ -207,7 +175,6 @@ def check_one(target: DbTarget, timeout_sec: int = 25) -> DbHealth:
             except Exception:
                 worst_pct = None
 
-            # Backups
             last_df = None
             last_arch = None
             try:
@@ -227,7 +194,7 @@ def check_one(target: DbTarget, timeout_sec: int = 25) -> DbHealth:
             return DbHealth(
                 status="UP",
                 details="Log:{}".format(log_mode),
-                version=inst_version,  # from v$instance
+                version=inst_version,
                 role=role,
                 open_mode=open_mode,
                 inst_status=inst_status,
@@ -273,7 +240,6 @@ class MonitorApp(ttk.Frame):
         init_oracle_client_if_needed(cfg)
         self._refresh_table()
 
-    # --- UI ---
     def _build_ui(self):
         topbar = ttk.Frame(self)
         topbar.pack(side=tk.TOP, fill=tk.X, padx=8, pady=8)
@@ -291,20 +257,18 @@ class MonitorApp(ttk.Frame):
         ttk.Button(topbar, text="Import JSON", command=self._import_json).pack(side=tk.LEFT, padx=(10, 0))
         ttk.Button(topbar, text="Export JSON", command=self._export_json).pack(side=tk.LEFT)
 
-        # Client lib
         ttk.Label(topbar, text="Client lib dir:").pack(side=tk.LEFT, padx=(10, 0))
         self.client_dir_var = tk.StringVar(value=self.cfg.get("client_lib_dir", ""))
         ttk.Entry(topbar, textvariable=self.client_dir_var, width=28).pack(side=tk.LEFT, padx=4)
         ttk.Button(topbar, text="Browse", command=self._pick_client_dir).pack(side=tk.LEFT)
 
-        # Tree
         self.tree = ttk.Treeview(self, columns=self.COLUMNS, show="headings", height=18)
         for col in self.COLUMNS:
             self.tree.heading(col, text=col)
             width = 120
-            if col in ("DB Version",):
+            if col == "DB Version":
                 width = 300
-            if col in ("Error",):
+            if col == "Error":
                 width = 320
             if col in ("LastFull/Inc", "LastArch"):
                 width = 170
@@ -319,16 +283,10 @@ class MonitorApp(ttk.Frame):
             bold_font.configure(weight="bold")
         except Exception:
             bold_font = None
-
-        # OK rows: green text
         self.tree.tag_configure("ROW_OK", foreground="#1b5e20", font=bold_font if bold_font else None)
-        # Critical rows: red, bold
         self.tree.tag_configure("ROW_CRIT", foreground="#b71c1c", font=bold_font if bold_font else None)
 
         bottombar = ttk.Frame(self)
-        bottombar.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=4)
-        self.status_var = tk.StringVar(value="Idle")
-        ttk.Label(bottombar, textvariable=self.status_var).pack(side=tk.LEFT) ttk.Frame(self)
         bottombar.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=4)
         self.status_var = tk.StringVar(value="Idle")
         ttk.Label(bottombar, textvariable=self.status_var).pack(side=tk.LEFT)
@@ -353,14 +311,13 @@ class MonitorApp(ttk.Frame):
             values[0] = t.name
             self.tree.insert("", tk.END, iid=t.name, values=tuple(values))
 
-    # --- Monitoring ---
     def start(self):
         if self._running:
             return
         self.interval_sec = self.interval_var.get()
         self._stop_flag.clear()
         self._running = True
-        self.status_var.set("Monitoring every {}s…".format(self.interval_sec))
+        self.status_var.set("Monitoring every {}s...".format(self.interval_sec))
         self.after(200, self._loop)
 
     def stop(self):
@@ -382,7 +339,7 @@ class MonitorApp(ttk.Frame):
         if not self.targets:
             self.status_var.set("No targets configured")
             return
-        self.status_var.set("Checking…")
+        self.status_var.set("Checking...")
         for t in self.targets:
             try:
                 res = check_one(t)
@@ -405,28 +362,26 @@ class MonitorApp(ttk.Frame):
             ok = age_hours <= 12
         else:
             ok = (age_hours/24.0) <= 3
-        return "{} {}".format(_chip(ok), _dt_str(when))
+        return "{}".format(_dt_str(when))
 
     def _update_row(self, name: str, h: DbHealth):
-        # Build plain text values (no emoji squares)
         vals = (
-            name,                           # DB Name
-            h.host or "-",                  # Host
-            h.status,                        # Status
-            h.inst_status or "-",           # Inst_status
-            h.role or "-",                  # Role
-            h.open_mode or "-",             # OpenMode
-            self._fmt_sessions(h),           # Sessions
-            self._fmt_worst_ts(h),           # WorstTS%
-            self._fmt_backup_cell(h.last_full_inc_backup, arch=False),   # LastFull/Inc
-            self._fmt_backup_cell(h.last_arch_backup, arch=True),        # LastArch
-            h.version or "-",               # DB Version
-            h.elapsed_ms,                    # Ms
-            h.ts,                            # LastChecked
-            h.error or ("" if h.status=="UP" else h.details)  # Error
+            name,
+            h.host or "-",
+            h.status,
+            h.inst_status or "-",
+            h.role or "-",
+            h.open_mode or "-",
+            self._fmt_sessions(h),
+            self._fmt_worst_ts(h),
+            self._fmt_backup_cell(h.last_full_inc_backup, arch=False),
+            self._fmt_backup_cell(h.last_arch_backup, arch=True),
+            h.version or "-",
+            h.elapsed_ms,
+            h.ts,
+            h.error or ("" if h.status=="UP" else h.details)
         )
 
-        # Determine severity for the WHOLE ROW (Treeview can't color per cell)
         crit = False
         if h.status.upper() != "UP":
             crit = True
@@ -436,13 +391,11 @@ class MonitorApp(ttk.Frame):
             crit = True
         if h.worst_ts_pct_used is not None and h.worst_ts_pct_used >= 90.0:
             crit = True
-        # Backup thresholds
         if h.last_arch_backup:
             ageh = (datetime.now(h.last_arch_backup.tzinfo) - h.last_arch_backup).total_seconds()/3600.0
             if ageh > 12:
                 crit = True
         else:
-            # No data considered critical
             crit = True
         if h.last_full_inc_backup:
             aged = (datetime.now(h.last_full_inc_backup.tzinfo) - h.last_full_inc_backup).total_seconds()/86400.0
@@ -458,7 +411,6 @@ class MonitorApp(ttk.Frame):
         else:
             self.tree.insert("", tk.END, iid=name, values=vals, tags=(tag,))
 
-    # --- CRUD on targets ---
     def _add_dialog(self):
         DbEditor(self, on_save=self._add_target)
 
@@ -540,7 +492,7 @@ class MonitorApp(ttk.Frame):
 
 
 class DbEditor(tk.Toplevel):
-    def __init__(self, parent: MonitorApp, target: Optional[DbTarget] = None, on_save=None):
+    def __init__(self, parent: "MonitorApp", target: Optional[DbTarget] = None, on_save=None):
         super().__init__(parent)
         self.title("DB Target")
         self.resizable(False, False)
@@ -564,7 +516,7 @@ class DbEditor(tk.Toplevel):
             e = ttk.Entry(r, textvariable=var, show=show, width=48)
             e.pack(side=tk.LEFT, padx=4)
             if browse:
-                btn = ttk.Button(r, text="…", width=3, command=lambda: self._pick_dir(var))
+                btn = ttk.Button(r, text="...", width=3, command=lambda: self._pick_dir(var))
                 btn.pack(side=tk.LEFT)
 
         row("DB Name:", self.var_name)
@@ -616,7 +568,6 @@ class DbEditor(tk.Toplevel):
 def main():
     cfg = load_config()
     root = tk.Tk()
-    # Improve default scaling on HiDPI
     try:
         if sys.platform.startswith("win"):
             from ctypes import windll
