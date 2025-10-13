@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
 """
-Oracle DB Health GUI Monitor (tksheet grid, per-cell red/green bold text)
-- Tkinter + tksheet to allow PER-CELL styling
-- Uses python-oracledb with Oracle Client (thick recommended)
-- Checks every N seconds (default 300)
-- Config: ~/.ora_gui_monitor/config.json
-- Columns (order fixed):
+Oracle DB Health GUI Monitor (Treeview + emoji chips) — Version 2
+- Pure Tkinter Treeview (no extra deps)
+- Uses emojis (✅ / ❌) before the text in key cells (no colored squares)
+- Monitors multiple Oracle DBs at an interval, using python-oracledb
+- Column order:
   DB Name, Host, Status, Inst_status, Role, OpenMode, Sessions, WorstTS%,
   LastFull/Inc, LastArch, DB Version, Ms, LastChecked, Error
-- Coloring rules (per cell, text only):
-  * Status: GREEN if UP else RED (bold)
-  * Inst_status: GREEN if OPEN else RED (bold)
-  * OpenMode: GREEN if contains OPEN else RED (bold)
-  * WorstTS%: RED if >= 90.0 else GREEN (bold)
-  * LastArch: RED if older than 12 hours; GREEN otherwise (bold; missing value = RED)
-  * LastFull/Inc: RED if older than 3 days; GREEN otherwise (bold; missing value = RED)
+Rules (emoji shown before text):
+  - Status: ✅ if UP else ❌
+  - Inst_status: ✅ if OPEN else ❌
+  - OpenMode: ✅ if contains OPEN else ❌
+  - WorstTS%: ❌ if >= 90.0 else ✅
+  - LastArch: ❌ if older than 12 hours (or missing) else ✅
+  - LastFull/Inc: ❌ if older than 3 days (or missing) else ✅
 Install once:
-    pip install python-oracledb tksheet
+    pip install python-oracledb
 Run:
-    python oracle_db_health_gui_tksheet.py
+    python oracle_db_health_gui_emojis_v2.py
 """
 import json
 import os
@@ -34,22 +33,12 @@ from typing import Dict, List, Optional
 # GUI
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
-import tkinter.font as tkfont
-
-# Grid (per-cell styling)
-try:
-    from tksheet import Sheet
-except Exception as e:
-    raise SystemExit(
-        "tksheet is required for per-cell colors. Install with: pip install tksheet\n"
-        "Error: {}".format(e)
-    )
 
 # Oracle
 try:
     import oracledb
 except Exception:
-    oracledb = None  # defer error until connect
+    oracledb = None  # defer error to connection time
 
 APP_NAME = "Oracle DB Health GUI Monitor"
 CONFIG_DIR = Path.home() / ".ora_gui_monitor"
@@ -57,8 +46,12 @@ CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 CONFIG_PATH = CONFIG_DIR / "config.json"
 
 ORACLE_CLIENT_LIB_DIR = os.environ.get("ORACLE_CLIENT_LIB_DIR", "")
-DEFAULT_INTERVAL_SEC = 300
+DEFAULT_INTERVAL_SEC = 300  # 5 minutes
 MAX_WORKERS = 8
+
+# Emoji (use explicit unicode escapes for reliability)
+GOOD = "\u2705"  # ✅
+BAD = "\u274C"   # ❌
 
 @dataclass
 class DbTarget:
@@ -67,7 +60,7 @@ class DbTarget:
     user: Optional[str] = None
     password: Optional[str] = None
     wallet_dir: Optional[str] = None
-    mode: str = "thin"
+    mode: str = "thin"  # "thick" or "thin"
 
 @dataclass
 class DbHealth:
@@ -131,59 +124,32 @@ def _connect(target: DbTarget):
 
 SQLS = {
     "db": (
-        """
-        SELECT name, open_mode, database_role, log_mode
-        FROM v$database
-        """
+        "SELECT name, open_mode, database_role, log_mode FROM v$database"
     ),
     "inst": (
-        """
-        SELECT instance_name, status, host_name, version, startup_time
-        FROM v$instance
-        """
+        "SELECT instance_name, status, host_name, version, startup_time FROM v$instance"
     ),
     "sess": (
-        """
-        SELECT COUNT(*) total,
-               SUM(CASE WHEN status='ACTIVE' THEN 1 ELSE 0 END) active
-        FROM v$session
-        WHERE type='USER'
-        """
+        "SELECT COUNT(*) total, SUM(CASE WHEN status='ACTIVE' THEN 1 ELSE 0 END) active "
+        "FROM v$session WHERE type='USER'"
     ),
     "tspace": (
-        """
-        SELECT ts.tablespace_name,
-               ROUND((1 - NVL(fs.free_mb,0)/ts.size_mb)*100,2) pct_used
-        FROM (
-            SELECT tablespace_name, SUM(bytes)/1024/1024 size_mb
-            FROM dba_data_files
-            GROUP BY tablespace_name
-        ) ts
-        LEFT JOIN (
-            SELECT tablespace_name, SUM(bytes)/1024/1024 free_mb
-            FROM dba_free_space
-            GROUP BY tablespace_name
-        ) fs
-        ON ts.tablespace_name = fs.tablespace_name
-        """
+        "SELECT ts.tablespace_name, ROUND((1 - NVL(fs.free_mb,0)/ts.size_mb)*100,2) pct_used "
+        "FROM (SELECT tablespace_name, SUM(bytes)/1024/1024 size_mb FROM dba_data_files GROUP BY tablespace_name) ts "
+        "LEFT JOIN (SELECT tablespace_name, SUM(bytes)/1024/1024 free_mb FROM dba_free_space GROUP BY tablespace_name) fs "
+        "ON ts.tablespace_name=fs.tablespace_name"
     ),
     "bk_data": (
-        """
-        SELECT MAX(bp.completion_time)
-        FROM v$backup_set bs
-        JOIN v$backup_piece bp
-          ON bs.set_stamp = bp.set_stamp AND bs.set_count = bp.set_count
-        WHERE bs.backup_type = 'D'
-        """
+        "SELECT MAX(bp.completion_time) "
+        "FROM v$backup_set bs JOIN v$backup_piece bp "
+        "ON bs.set_stamp=bp.set_stamp AND bs.set_count=bp.set_count "
+        "WHERE bs.backup_type='D'"
     ),
     "bk_arch": (
-        """
-        SELECT MAX(bp.completion_time)
-        FROM v$backup_set bs
-        JOIN v$backup_piece bp
-          ON bs.set_stamp = bp.set_stamp AND bs.set_count = bp.set_count
-        WHERE bs.backup_type = 'L'
-        """
+        "SELECT MAX(bp.completion_time) "
+        "FROM v$backup_set bs JOIN v$backup_piece bp "
+        "ON bs.set_stamp=bp.set_stamp AND bs.set_count=bp.set_count "
+        "WHERE bs.backup_type='L'"
     ),
 }
 
@@ -197,10 +163,10 @@ def check_one(target: DbTarget, timeout_sec: int = 25) -> DbHealth:
             conn.call_timeout = timeout_sec * 1000
             cur = conn.cursor()
 
-            cur.execute(SQLS["db"])  # name, open_mode, role, log_mode
+            cur.execute(SQLS["db"])
             name, open_mode, role, log_mode = cur.fetchone()
 
-            cur.execute(SQLS["inst"])  # inst_name, inst_status, host_name, version, startup_time
+            cur.execute(SQLS["inst"])
             inst_name, inst_status, host_name, inst_version, startup_time = cur.fetchone()
 
             sessions_total, sessions_active = 0, 0
@@ -264,10 +230,10 @@ def check_one(target: DbTarget, timeout_sec: int = 25) -> DbHealth:
         )
 
 class MonitorApp(ttk.Frame):
-    COLS = [
+    COLUMNS = (
         "DB Name", "Host", "Status", "Inst_status", "Role", "OpenMode", "Sessions",
         "WorstTS%", "LastFull/Inc", "LastArch", "DB Version", "Ms", "LastChecked", "Error"
-    ]
+    )
 
     def __init__(self, master, cfg: Dict):
         super().__init__(master)
@@ -308,27 +274,20 @@ class MonitorApp(ttk.Frame):
         ttk.Entry(topbar, textvariable=self.client_dir_var, width=28).pack(side=tk.LEFT, padx=4)
         ttk.Button(topbar, text="Browse", command=self._pick_client_dir).pack(side=tk.LEFT)
 
-        # Fonts for emphasis
-        try:
-            base_font = tkfont.nametofont("TkDefaultFont")
-            self.bold_font = base_font.copy()
-            self.bold_font.configure(weight="bold")
-        except Exception:
-            self.bold_font = None
+        self.tree = ttk.Treeview(self, columns=self.COLUMNS, show="headings", height=18)
+        for col in self.COLUMNS:
+            self.tree.heading(col, text=col)
+            width = 120
+            if col in ("DB Version",):
+                width = 300
+            if col in ("Error",):
+                width = 320
+            if col in ("LastFull/Inc", "LastArch"):
+                width = 170
+            self.tree.column(col, width=width, stretch=True)
+        self.tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
-        # Sheet grid
-        self.sheet = Sheet(self, headers=self.COLS)
-        self.sheet.enable_bindings((
-            "single_select",
-            "row_select",
-            "drag_select",
-            "column_width_resize",
-            "arrowkeys",
-            "copy",
-        ))
-        self.sheet.grid(row=1, column=0, sticky="nsew", padx=8, pady=8)
-        self.rowconfigure(1, weight=1)
-        self.columnconfigure(0, weight=1)
+        self.tree.tag_configure("NEUTRAL", background="#fafafa")
 
         bottombar = ttk.Frame(self)
         bottombar.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=4)
@@ -349,14 +308,14 @@ class MonitorApp(ttk.Frame):
                 messagebox.showwarning(APP_NAME, "Failed to init client: {}".format(e))
 
     def _refresh_table(self):
-        data = []
+        for i in self.tree.get_children():
+            self.tree.delete(i)
         for t in self.targets:
-            row = [t.name, "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"]
-            data.append(row)
-        self.sheet.set_sheet_data(data, reset_col_positions=True, reset_row_positions=True)
-        self.sheet.refresh()
+            values = ["-"] * len(self.COLUMNS)
+            values[0] = t.name
+            self.tree.insert("", tk.END, iid=t.name, values=tuple(values), tags=("NEUTRAL",))
 
-    # Monitoring
+    # --- Monitoring ---
     def start(self):
         if self._running:
             return
@@ -386,83 +345,85 @@ class MonitorApp(ttk.Frame):
             self.status_var.set("No targets configured")
             return
         self.status_var.set("Checking...")
-        for idx, t in enumerate(self.targets):
+        for t in self.targets:
             try:
                 res = check_one(t)
             except Exception as e:
                 res = DbHealth(status="DOWN", details=str(e), error=str(e))
-            self._update_row(idx, res)
+            self._update_row(t.name, res)
         self.status_var.set("Last run: {}".format(datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
 
-    def _set_cell(self, row: int, col_name: str, value: str):
-        col = self.COLS.index(col_name)
-        self.sheet.set_cell_data(row, col, value, redraw=False)
+    def _fmt_sessions(self, h: DbHealth) -> str:
+        return "{}/{}".format(h.sessions_active, h.sessions_total) if h.sessions_total else "-"
 
-    def _color_cell(self, row: int, col_name: str, ok: bool):
-        col = self.COLS.index(col_name)
-        fg = "#1b5e20" if ok else "#b71c1c"  # green or red
-        font = self.bold_font if self.bold_font else None
-        self.sheet.highlight_cells(row=row, column=col, fg=fg, font=font, redraw=False)
+    def _fmt_worst_ts(self, h: DbHealth) -> str:
+        return "{:.1f}%".format(h.worst_ts_pct_used) if h.worst_ts_pct_used is not None else "-"
 
-    def _update_row(self, row: int, h: DbHealth):
-        # Fill basic values
-        self._set_cell(row, "DB Name", self.targets[row].name)
-        self._set_cell(row, "Host", h.host or "-")
-        self._set_cell(row, "Status", h.status)
-        self._set_cell(row, "Inst_status", h.inst_status or "-")
-        self._set_cell(row, "Role", h.role or "-")
-        self._set_cell(row, "OpenMode", h.open_mode or "-")
-        self._set_cell(row, "Sessions", "{}/{}".format(h.sessions_active, h.sessions_total) if h.sessions_total else "-")
-        self._set_cell(row, "WorstTS%", "{:.1f}%".format(h.worst_ts_pct_used) if h.worst_ts_pct_used is not None else "-")
-        self._set_cell(row, "LastFull/Inc", _dt_str(h.last_full_inc_backup))
-        self._set_cell(row, "LastArch", _dt_str(h.last_arch_backup))
-        self._set_cell(row, "DB Version", h.version or "-")
-        self._set_cell(row, "Ms", str(h.elapsed_ms))
-        self._set_cell(row, "LastChecked", h.ts)
-        self._set_cell(row, "Error", h.error or ("" if h.status=="UP" else h.details))
+    def _mark(self, ok: bool) -> str:
+        return GOOD if ok else BAD
 
-        # Apply per-cell coloring rules (bold red or green)
-        self._color_cell(row, "Status", h.status.upper() == "UP")
-        self._color_cell(row, "Inst_status", (h.inst_status or "").upper() == "OPEN")
-        self._color_cell(row, "OpenMode", "OPEN" in (h.open_mode or "").upper())
+    def _fmt_backup_cell(self, when: Optional[datetime], arch: bool=False) -> str:
+        if not when:
+            return "{} -".format(self._mark(False))
+        age_hours = (datetime.now(when.tzinfo) - when).total_seconds()/3600.0
+        if arch:
+            ok = age_hours <= 12
+        else:
+            ok = (age_hours/24.0) <= 3
+        return "{} {}".format(self._mark(ok), _dt_str(when))
+
+    def _update_row(self, name: str, h: DbHealth):
+        status_cell = "{} {}".format(self._mark(h.status.upper() == "UP"), h.status)
+        inst_cell = "{} {}".format(self._mark((h.inst_status or "").upper() == "OPEN"), h.inst_status or "-")
+        open_cell = "{} {}".format(self._mark("OPEN" in (h.open_mode or "").upper()), h.open_mode or "-")
         worst_ok = not (h.worst_ts_pct_used is not None and h.worst_ts_pct_used >= 90.0)
-        self._color_cell(row, "WorstTS%", worst_ok)
+        worst_cell = "{} {}".format(self._mark(worst_ok), self._fmt_worst_ts(h))
 
-        if h.last_arch_backup:
-            hours = (datetime.now(h.last_arch_backup.tzinfo) - h.last_arch_backup).total_seconds() / 3600.0
-            self._color_cell(row, "LastArch", hours <= 12)
+        vals = (
+            name,
+            h.host or "-",
+            status_cell,
+            inst_cell,
+            h.role or "-",
+            open_cell,
+            self._fmt_sessions(h),
+            worst_cell,
+            self._fmt_backup_cell(h.last_full_inc_backup, arch=False),
+            self._fmt_backup_cell(h.last_arch_backup, arch=True),
+            h.version or "-",
+            h.elapsed_ms,
+            h.ts,
+            h.error or ("" if h.status=="UP" else h.details)
+        )
+        if name in self.tree.get_children():
+            self.tree.item(name, values=vals, tags=("NEUTRAL",))
         else:
-            self._color_cell(row, "LastArch", False)
+            self.tree.insert("", tk.END, iid=name, values=vals, tags=("NEUTRAL",))
 
-        if h.last_full_inc_backup:
-            days = (datetime.now(h.last_full_inc_backup.tzinfo) - h.last_full_inc_backup).total_seconds() / 86400.0
-            self._color_cell(row, "LastFull/Inc", days <= 3)
-        else:
-            self._color_cell(row, "LastFull/Inc", False)
-
-        self.sheet.refresh()
-
-    # CRUD
+    # --- CRUD on targets ---
     def _add_dialog(self):
         DbEditor(self, on_save=self._add_target)
 
     def _edit_selected(self):
-        sel = self.sheet.get_selected_rows()
+        sel = self.tree.selection()
         if not sel:
             messagebox.showinfo(APP_NAME, "Select a row to edit.")
             return
-        row = sel[0]
-        t = self.targets[row]
+        name = sel[0]
+        t = next((x for x in self.targets if x.name == name), None)
+        if not t:
+            messagebox.showerror(APP_NAME, "Target not found.")
+            return
         DbEditor(self, target=t, on_save=self._update_target)
 
     def _remove_selected(self):
-        sel = self.sheet.get_selected_rows()
+        sel = self.tree.selection()
         if not sel:
             return
-        row = sel[0]
-        del self.targets[row]
+        name = sel[0]
+        self.targets = [t for t in self.targets if t.name != name]
+        self.tree.delete(name)
         self._persist_targets()
-        self._refresh_table()
 
     def _add_target(self, t: DbTarget):
         if any(x.name == t.name for x in self.targets):
