@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-Oracle DB Health GUI Monitor (Enhanced, per-cell coloring)
-- Cross-platform Python GUI using Tkinter + tksheet grid
-- Uses python-oracledb (thick mode recommended) so it can leverage an installed Oracle Client
+Oracle DB Health GUI Monitor (Treeview edition – no extra deps)
+- Cross-platform Python GUI using Tkinter Treeview only (no tksheet)
+- Uses python-oracledb (thick mode recommended) with Oracle Client
 - Monitors multiple databases on a schedule (default: every 5 minutes)
 - Reads/writes a JSON config at: ~/.ora_gui_monitor/config.json
 - Supports TNS aliases (sqlnet.ora/tnsnames.ora) or EZConnect strings
-- Color-coded health results with per-cell background for key metrics
+- Emulated per-cell status using compact chips (🟩/🟥) since Treeview can't color individual cells
 - Shows last Datafile FULL/INCREMENTAL backup and last ARCHIVELOG backup timestamps
-  * ARCH backup older than 12 hours => red background, else green
-  * FULL/INC backup older than 3 days => red background, else green
-- Column order per request; DB Version now from v$instance.version (includes patch level)
-- Error column shows connectivity errors; "TNS Alias" label in Add DB window
+  * ARCH backup older than 12 hours => 🟥, else 🟩
+  * FULL/INC backup older than 3 days => 🟥, else 🟩
+- Column order per request; DB Version from v$instance.version
+- Error column shows connectivity errors; "TNS Alias / EZConnect" label in Add DB window
 
 Prereqs
 -------
 Run:
-    pip install python-oracledb tksheet
+    pip install python-oracledb
 
 You must have Oracle Client installed and accessible (e.g., Instant Client).
 Set the location via ORACLE_CLIENT_LIB_DIR env var or pick it in the app.
@@ -39,21 +39,6 @@ from typing import Dict, List, Optional
 # GUI
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
-
-# Third-party grid that supports per-cell coloring
-try:
-    from tksheet import Sheet
-except Exception as e:
-    _msg = (
-        "Missing dependency: tksheet
-
-"
-        "Install it with: pip install tksheet
-
-"
-        f"Error: {e}"
-    )
-    raise SystemExit(_msg)
 
 # Oracle
 import oracledb
@@ -155,8 +140,6 @@ SQLS = {
     "db": "SELECT name, open_mode, database_role, log_mode FROM v$database",
     # Use version from v$instance per request
     "inst": "SELECT instance_name, status, host_name, version, startup_time FROM v$instance",
-    # Keep banner_full as fallback if needed (unused for display now)
-    "vers": "SELECT banner_full FROM v$version WHERE banner_full LIKE 'Oracle%'",
     "sess": (
         "SELECT COUNT(*) total, SUM(CASE WHEN status='ACTIVE' THEN 1 ELSE 0 END) active "
         "FROM v$session WHERE type='USER'"
@@ -185,6 +168,10 @@ SQLS = {
 
 def _dt_str(dt: Optional[datetime]) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S") if dt else "-"
+
+
+def _chip(ok: bool) -> str:
+    return "🟩" if ok else "🟥"
 
 
 def check_one(target: DbTarget, timeout_sec: int = 25) -> DbHealth:
@@ -267,10 +254,10 @@ def check_one(target: DbTarget, timeout_sec: int = 25) -> DbHealth:
 
 
 class MonitorApp(ttk.Frame):
-    COLS = [
+    COLUMNS = (
         "DB Name", "Host", "Status", "Inst_status", "Role", "OpenMode", "Sessions",
         "WorstTS%", "LastFull/Inc", "LastArch", "DB Version", "Ms", "LastChecked", "Error"
-    ]
+    )
 
     def __init__(self, master, cfg: Dict):
         super().__init__(master)
@@ -313,21 +300,24 @@ class MonitorApp(ttk.Frame):
         ttk.Entry(topbar, textvariable=self.client_dir_var, width=28).pack(side=tk.LEFT, padx=4)
         ttk.Button(topbar, text="Browse", command=self._pick_client_dir).pack(side=tk.LEFT)
 
-        # Grid sheet
-        self.sheet = Sheet(self, headers=self.COLS)
-        self.sheet.enable_bindings((
-            "single_select",
-            "row_select",
-            "drag_select",
-            "column_width_resize",
-            "arrowkeys",
-            "rc_insert_row",
-            "rc_delete_row",
-            "copy",
-        ))
-        self.sheet.grid(row=1, column=0, sticky="nsew", padx=8, pady=8)
-        self.rowconfigure(1, weight=1)
-        self.columnconfigure(0, weight=1)
+        # Tree
+        self.tree = ttk.Treeview(self, columns=self.COLUMNS, show="headings", height=18)
+        for col in self.COLUMNS:
+            self.tree.heading(col, text=col)
+            width = 120
+            if col in ("DB Version",):
+                width = 300
+            if col in ("Error",):
+                width = 320
+            if col in ("LastFull/Inc", "LastArch"):
+                width = 170
+            self.tree.column(col, width=width, stretch=True)
+        self.tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        # Row tag styles
+        self.tree.tag_configure("UP_OK", background="#e8f5e9")
+        self.tree.tag_configure("UP_WARN", background="#fff8e1")
+        self.tree.tag_configure("DOWN", background="#ffebee")
 
         bottombar = ttk.Frame(self)
         bottombar.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=4)
@@ -347,16 +337,12 @@ class MonitorApp(ttk.Frame):
                 messagebox.showwarning(APP_NAME, f"Failed to init client: {e}")
 
     def _refresh_table(self):
-        # Clear and repopulate empty rows for known targets
-        data = []
+        for i in self.tree.get_children():
+            self.tree.delete(i)
         for t in self.targets:
-            row = [t.name, "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"]
-            data.append(row)
-        self.sheet.set_sheet_data(data)
-        self._clear_highlights()
-
-    def _clear_highlights(self):
-        self.sheet.dehighlight_all()
+            values = ["-"] * len(self.COLUMNS)
+            values[0] = t.name
+            self.tree.insert("", tk.END, iid=t.name, values=tuple(values))
 
     # --- Monitoring ---
     def start(self):
@@ -388,103 +374,87 @@ class MonitorApp(ttk.Frame):
             self.status_var.set("No targets configured")
             return
         self.status_var.set("Checking…")
-        for idx, t in enumerate(self.targets):
+        for t in self.targets:
             try:
                 res = check_one(t)
             except Exception as e:
                 res = DbHealth(status="DOWN", details=str(e), error=str(e))
-            self._update_row(idx, res)
+            self._update_row(t.name, res)
         self.status_var.set(f"Last run: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-    def _color_cell(self, row: int, col_name: str, value_ok: bool, warning_only: bool=False):
-        """Color a cell green if ok, red if not. If warning_only is True, green is omitted."""
-        col = self.COLS.index(col_name)
-        if value_ok:
-            bg = "#e8f5e9"  # green-ish
+    def _fmt_sessions(self, h: DbHealth) -> str:
+        return f"{h.sessions_active}/{h.sessions_total}" if h.sessions_total else "-"
+
+    def _fmt_worst_ts(self, h: DbHealth) -> str:
+        return f"{h.worst_ts_pct_used:.1f}%" if h.worst_ts_pct_used is not None else "-"
+
+    def _fmt_backup_cell(self, when: Optional[datetime], arch: bool=False) -> str:
+        if not when:
+            return "-"
+        age_hours = (datetime.now(when.tzinfo) - when).total_seconds()/3600.0 if when else 0
+        if arch:
+            ok = age_hours <= 12
         else:
-            bg = "#ffebee"  # red-ish
-        self.sheet.highlight_cells(row=row, column=col, bg=bg, fg="black", redraw=False)
+            ok = (age_hours/24.0) <= 3
+        return f"{_chip(ok)} {_dt_str(when)}"
 
-    def _update_row(self, row: int, h: DbHealth):
-        sessions = f"{h.sessions_active}/{h.sessions_total}" if h.sessions_total else "-"
-        worst_ts = f"{h.worst_ts_pct_used:.1f}%" if h.worst_ts_pct_used is not None else "-"
-        last_full = _dt_str(h.last_full_inc_backup)
-        last_arch = _dt_str(h.last_arch_backup)
-
-        vals = [
-            self.targets[row].name,     # DB Name
-            h.host or "-",              # Host
-            h.status,                    # Status
-            h.inst_status or "-",       # Inst_status
-            h.role or "-",              # Role
-            h.open_mode or "-",         # OpenMode
-            sessions,                    # Sessions
-            worst_ts,                    # WorstTS%
-            last_full,                   # LastFull/Inc
-            last_arch,                   # LastArch
-            h.version or "-",           # DB Version (v$instance.version)
-            h.elapsed_ms,                # Ms
-            h.ts,                        # LastChecked
+    def _update_row(self, name: str, h: DbHealth):
+        vals = (
+            name,                           # DB Name
+            h.host or "-",                  # Host
+            f"{_chip(h.status.upper()=='UP')} {h.status}",  # Status (chip)
+            f"{_chip((h.inst_status or '').upper()=='OPEN')} {h.inst_status or '-'}",  # Inst_status
+            h.role or "-",                  # Role
+            f"{_chip('OPEN' in (h.open_mode or '').upper())} {h.open_mode or '-'}",     # OpenMode
+            self._fmt_sessions(h),           # Sessions
+            f"{_chip(not (h.worst_ts_pct_used is not None and h.worst_ts_pct_used >= 90.0))} {self._fmt_worst_ts(h)}",  # WorstTS%
+            self._fmt_backup_cell(h.last_full_inc_backup, arch=False),   # LastFull/Inc
+            self._fmt_backup_cell(h.last_arch_backup, arch=True),        # LastArch
+            h.version or "-",               # DB Version
+            h.elapsed_ms,                    # Ms
+            h.ts,                            # LastChecked
             h.error or ("" if h.status=="UP" else h.details)  # Error
-        ]
+        )
 
-        # Set row values
-        for c, v in enumerate(vals):
-            self.sheet.set_cell_data(row, c, v, redraw=False)
-
-        # Clear previous highlights on this row by re-highlighting with neutral for all, then color key cells
-        # (tksheet does not provide per-row clear, so we simply overwrite target cells)
-
-        # Color logic per request
-        # Status cell: green if UP else red
-        self._color_cell(row, "Status", h.status.upper() == "UP")
-        # Inst_status: green if OPEN else red
-        self._color_cell(row, "Inst_status", (h.inst_status or "").upper() == "OPEN")
-        # OpenMode: green if contains OPEN else red
-        self._color_cell(row, "OpenMode", "OPEN" in (h.open_mode or "").upper())
-        # WorstTS%: red if >= 90%, else green
-        worst_ok = not (h.worst_ts_pct_used is not None and h.worst_ts_pct_used >= 90.0)
-        self._color_cell(row, "WorstTS%", worst_ok)
-        # LastArch: red if older than 12 hours
-        if h.last_arch_backup:
-            hours = (datetime.now(h.last_arch_backup.tzinfo) - h.last_arch_backup).total_seconds() / 3600.0
-            arch_ok = hours <= 12
-            self._color_cell(row, "LastArch", arch_ok)
-        # LastFull/Inc: red if older than 3 days
-        if h.last_full_inc_backup:
-            days = (datetime.now(h.last_full_inc_backup.tzinfo) - h.last_full_inc_backup).total_seconds() / 86400.0
-            full_ok = days <= 3
-            self._color_cell(row, "LastFull/Inc", full_ok)
-
-        # If DOWN, also color Status, Inst_status, OpenMode red (already handled) and maybe Error column background
-        if h.status.upper() != "UP":
-            err_col = self.COLS.index("Error")
-            self.sheet.highlight_cells(row=row, column=err_col, bg="#ffebee", fg="black", redraw=False)
-
-        self.sheet.refresh()
+        tag = "DOWN"
+        if h.status == "UP":
+            warn = False
+            if (h.open_mode and "OPEN" not in h.open_mode.upper()) or (h.inst_status and h.inst_status.upper() != "OPEN"):
+                warn = True
+            if h.worst_ts_pct_used is not None and h.worst_ts_pct_used >= 85.0:
+                warn = True
+            if h.sessions_total and h.sessions_active / max(h.sessions_total, 1) >= 0.6:
+                warn = True
+            tag = "UP_WARN" if warn else "UP_OK"
+        if name in self.tree.get_children():
+            self.tree.item(name, values=vals, tags=(tag,))
+        else:
+            self.tree.insert("", tk.END, iid=name, values=vals, tags=(tag,))
 
     # --- CRUD on targets ---
     def _add_dialog(self):
         DbEditor(self, on_save=self._add_target)
 
     def _edit_selected(self):
-        # With tksheet, selection returns coordinates; we take active row
-        selected = self.sheet.get_selected_rows()
-        if not selected:
+        sel = self.tree.selection()
+        if not sel:
             messagebox.showinfo(APP_NAME, "Select a row to edit.")
             return
-        row = selected[0]
-        t = self.targets[row]
+        name = sel[0]
+        t = next((x for x in self.targets if x.name == name), None)
+        if not t:
+            messagebox.showerror(APP_NAME, "Target not found.")
+            return
         DbEditor(self, target=t, on_save=self._update_target)
 
     def _remove_selected(self):
-        selected = self.sheet.get_selected_rows()
-        if not selected:
+        sel = self.tree.selection()
+        if not sel:
             return
-        row = selected[0]
-        del self.targets[row]
+        name = sel[0]
+        self.targets = [t for t in self.targets if t.name != name]
+        self.tree.delete(name)
         self._persist_targets()
-        self._refresh_table()
 
     def _add_target(self, t: DbTarget):
         if any(x.name == t.name for x in self.targets):
