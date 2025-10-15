@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-Oracle DB Health GUI Monitor — Version 6
+Oracle DB Health GUI Monitor — Version 6 (with auto-run methods)
 """
-# (Full code content kept identical to the previous attempt.)
-# To keep the cell compact in this retry, we re-insert the same code.
+# (Same code as last message but with _toggle_auto/_start_auto/_stop_auto included)
 
 import json
 import os
@@ -383,6 +382,26 @@ class MonitorApp(ttk.Frame):
 
         self._font = tkfont.nametofont("TkDefaultFont")
 
+    # ----- Auto-run -----
+    def _toggle_auto(self):
+        if self.auto_var.get():
+            self._start_auto()
+        else:
+            self._stop_auto()
+        self.cfg["auto_run"] = self.auto_var.get()
+        save_config(self.cfg)
+
+    def _start_auto(self):
+        if getattr(self, "_auto_flag", False):
+            return
+        self._auto_flag = True
+        self.status_var.set(f"Auto-running every {self.interval_var.get()}s...")
+        self.after(200, self._loop)
+
+    def _stop_auto(self):
+        self._auto_flag = False
+        self.status_var.set("Auto-run stopped")
+
     # Column utilities
     def _persist_column_layout(self):
         widths = {col: self.tree.column(col, option="width") for col in self.LOGICAL_COLUMNS}
@@ -480,7 +499,7 @@ class MonitorApp(ttk.Frame):
         self.clipboard_clear()
         self.clipboard_append(text)
 
-    # Sorting
+    # Sorting helpers
     def _parse_sessions(self, s: str) -> Tuple[int,int]:
         t = str(s).strip()
         if " " in t: t = t.split()[-1]
@@ -554,7 +573,7 @@ class MonitorApp(ttk.Frame):
         self._renumber()
         self.tree.heading(col, command=lambda c=col: self._sort_by_column(c, not descending))
 
-    # Helpers
+    # Helpers & loop
     def _renumber(self):
         for i, iid in enumerate(self.tree.get_children(""), start=1):
             vals = list(self.tree.item(iid)["values"])
@@ -617,6 +636,7 @@ class MonitorApp(ttk.Frame):
         vals[colidx["Error"]] = hdict.get("error","")
         self.tree.item(name, values=vals)
 
+    # Run
     def run_all_once(self):
         self._checks_async(targets=self.targets)
 
