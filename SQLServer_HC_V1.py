@@ -22,9 +22,10 @@ SERVERS_PATH = os.path.join(CONFIG_DIR, "servers.json")
 SETTINGS_PATH = os.path.join(CONFIG_DIR, "settings.json")
 
 DEFAULT_SETTINGS = {
-    "refresh_minutes": 5,
+    "interval_sec": 300,          # 5 minutes default
+    "auto_run": True,             # auto-run health checks on interval
     "max_workers": 10,
-    "sqlcmd_path": "sqlcmd",     # path or 'sqlcmd' if on PATH
+    "sqlcmd_path": "sqlcmd",      # path or 'sqlcmd' if on PATH
     "separator": "|"
 }
 
@@ -121,7 +122,7 @@ def _sqlcmd_run(settings, instance, auth, username, password, query, sep):
     try:
         res = subprocess.run(args, capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace")
     except FileNotFoundError:
-        raise RuntimeError("sqlcmd not found. Set a valid path in Settings.")
+        raise RuntimeError("sqlcmd not found. Set a valid path near top of file or install it.")
     except subprocess.TimeoutExpired:
         raise RuntimeError("sqlcmd timed out")
 
@@ -172,7 +173,7 @@ def check_instance(settings, server):
     try:
         pwd = _get_password(instance, user) if auth == "sql" else None
         if auth == "sql" and (not pwd):
-            raise RuntimeError("No stored SQL password. Edit the server and tick 'Save password', then provide it when prompted.")
+            raise RuntimeError("No stored SQL password. Use Add/Edit → save password to Credential Manager.")
 
         sep = settings.get("separator", "|")
 
@@ -319,95 +320,117 @@ class ServerDialog(tk.Toplevel):
         }
         self.destroy()
 
-class SettingsDialog(tk.Toplevel):
-    def __init__(self, master, settings):
-        super().__init__(master)
-        self.title("Settings")
-        self.resizable(False, False)
-        if master: self.transient(master)
-        self.settings = dict(settings)
-
-        def row(lbl, key, width=28, ewidth=28):
-            frm = ttk.Frame(self); ttk.Label(frm, text=lbl, width=width).pack(side="left")
-            var = tk.StringVar(value=str(self.settings.get(key, "")))
-            ent = ttk.Entry(frm, textvariable=var, width=ewidth); ent.pack(side="left")
-            frm.pack(fill="x", padx=10, pady=4); return var
-
-        self.v_sqlcmd  = row("sqlcmd path (or 'sqlcmd'):", "sqlcmd_path", ewidth=36)
-        self.v_refresh = row("Auto refresh minutes:", "refresh_minutes", ewidth=8)
-        self.v_workers = row("Max parallel workers:", "max_workers", ewidth=8)
-
-        btns = ttk.Frame(self)
-        ttk.Button(btns, text="Save", command=self._save).grid(row=0, column=0, padx=6)
-        ttk.Button(btns, text="Cancel", command=self.destroy).grid(row=0, column=1, padx=6)
-        btns.pack(pady=8)
-        self.grab_set()
-
-    def _save(self):
-        try:
-            s = self.settings
-            s["sqlcmd_path"] = self.v_sqlcmd.get().strip() or "sqlcmd"
-            s["refresh_minutes"] = max(1, int(self.v_refresh.get()))
-            s["max_workers"] = max(1, int(self.v_workers.get()))
-            save_settings(s); self.destroy()
-        except Exception as e:
-            messagebox.showerror("Error", str(e))
-
 # ---- App ----
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP_NAME)
-        self.geometry("1300x720")
+        self.geometry("1320x740")
         self.settings = load_settings()
         self.servers = load_servers()
         self.data_rows = []
         self._timer_id = None
 
+        # Top bar
         bar = ttk.Frame(self)
         ttk.Button(bar, text="Refresh Now", command=self.refresh).pack(side="left", padx=5, pady=6)
-        ttk.Button(bar, text="Export CSV", command=self.export_csv).pack(side="left", padx=5)
-        ttk.Button(bar, text="Manage Servers", command=self.manage_servers).pack(side="left", padx=5)
-        ttk.Button(bar, text="Settings", command=self.open_settings).pack(side="left", padx=5)
-        self.status_lbl = ttk.Label(bar, text=""); self.status_lbl.pack(side="left", padx=15)
+
+        # Interval (sec) + Auto-run checkbox
+        ttk.Label(bar, text="Interval (sec):").pack(side="left", padx=(15,4))
+        self.interval_var = tk.StringVar(value=str(int(self.settings.get("interval_sec", 300))))
+        self.interval_entry = ttk.Entry(bar, width=6, textvariable=self.interval_var)
+        self.interval_entry.pack(side="left")
+        self.auto_var = tk.BooleanVar(value=bool(self.settings.get("auto_run", True)))
+        self.auto_chk = ttk.Checkbutton(bar, text="Auto-run", variable=self.auto_var, command=self._toggle_auto)
+        self.auto_chk.pack(side="left", padx=(8,4))
+        ttk.Button(bar, text="Apply", command=self._apply_interval).pack(side="left", padx=5)
+
+        # Instance controls
+        ttk.Button(bar, text="Add Instance", command=self.add_instance).pack(side="left", padx=10)
+        ttk.Button(bar, text="Edit Instance", command=self.edit_instance).pack(side="left", padx=5)
+        ttk.Button(bar, text="Remove Instance", command=self.remove_instance).pack(side="left", padx=5)
+
+        # Import/Export JSON
+        ttk.Button(bar, text="Import JSON", command=self.import_json).pack(side="left", padx=(20,5))
+        ttk.Button(bar, text="Export JSON", command=self.export_json).pack(side="left", padx=5)
+
+        self.status_lbl = ttk.Label(bar, text="")
+        self.status_lbl.pack(side="left", padx=15)
         bar.pack(fill="x")
 
-        self.tree = ttk.Treeview(self, columns=COLUMNS, show="headings")
+        # Grid
+        self.tree = ttk.Treeview(self, columns=COLUMNS, show="headings", selectmode="browse")
         for col in COLUMNS:
             self.tree.heading(col, text=col)
-            self.tree.column(col, width=170 if col not in ("S.No","CU") else 70, anchor="w")
+            self.tree.column(col, width=170 if col not in ("S.No","CU") else 80, anchor="w")
         self.tree.pack(fill="both", expand=True)
+
+        # Row colors
         self.tree.tag_configure("CRIT", background="#FDE7E9")
         self.tree.tag_configure("WARN", background="#FFF8E1")
         self.tree.tag_configure("OK",   background="#E8F5E9")
 
+        # Startup
         self.after(500, self.refresh)
-        self._schedule_next()
+        if self.auto_var.get():
+            self._schedule_next()
+
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    def _on_close(self):
-        if self._timer_id: self.after_cancel(self._timer_id)
-        self.destroy()
+    # ---- Timer logic ----
+    def _apply_interval(self):
+        try:
+            val = max(1, int(self.interval_var.get()))
+            self.settings["interval_sec"] = val
+            save_settings(self.settings)
+            if self._timer_id:
+                self.after_cancel(self._timer_id)
+                self._timer_id = None
+            if self.auto_var.get():
+                self._schedule_next()
+            self.set_status(f"Interval set to {val}s")
+        except Exception as e:
+            messagebox.showerror("Interval", str(e))
+
+    def _toggle_auto(self):
+        self.settings["auto_run"] = bool(self.auto_var.get())
+        save_settings(self.settings)
+        if self.auto_var.get():
+            self._schedule_next()
+            self.set_status("Auto-run enabled")
+        else:
+            if self._timer_id:
+                self.after_cancel(self._timer_id); self._timer_id = None
+            self.set_status("Auto-run disabled")
 
     def _schedule_next(self):
-        mins = int(self.settings.get("refresh_minutes", 5))
-        self._timer_id = self.after(mins * 60 * 1000, self._auto_tick)
+        secs = int(self.settings.get("interval_sec", 300))
+        self._timer_id = self.after(secs * 1000, self._auto_tick)
 
     def _auto_tick(self):
         self.refresh()
-        self._schedule_next()
+        if self.auto_var.get():
+            self._schedule_next()
 
+    def _on_close(self):
+        if self._timer_id:
+            self.after_cancel(self._timer_id)
+        self.destroy()
+
+    # ---- Status ----
     def set_status(self, txt):
         self.status_lbl.config(text=txt)
         self.status_lbl.update_idletasks()
 
+    # ---- Health run ----
     def refresh(self):
         srvs = self.servers.get("servers", [])
         if not srvs:
-            messagebox.showinfo("Add servers", "No servers configured. Click 'Manage Servers' to add.")
+            messagebox.showinfo("Add servers", "No servers configured. Click 'Add Instance'.")
             return
         self.set_status("Checking...")
-        self.tree.delete(*self.tree.get_children()); self.data_rows = []
+        self.tree.delete(*self.tree.get_children())
+        self.data_rows = []
 
         def work():
             rows = []
@@ -432,94 +455,98 @@ class App(tk.Tk):
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.set_status(f"Instances: {len(self.data_rows)} | Refreshed: {ts}")
 
-    def export_csv(self):
-        if not self.data_rows: return
-        path = filedialog.asksaveasfilename(
-            title="Export CSV", defaultextension=".csv",
-            filetypes=[("CSV", "*.csv")],
-            initialfile=f"SqlHealth_{datetime.now():%Y%m%d_%H%M%S}.csv"
+    # ---- Instance CRUD ----
+    def _select_instance_key(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo("Select", "Select a row first.")
+            return None
+        vals = self.tree.item(sel[0], "values")
+        # We use instance + environment to find the server entry
+        return {"instance": vals[1], "environment": vals[2]}
+
+    def add_instance(self):
+        sd = ServerDialog(self)
+        self.wait_window(sd)
+        if sd.result:
+            # Optionally prompt to save password now
+            if sd.result["auth"] == "sql" and sd.result.get("save_pwd") and keyring:
+                pwd = simpledialog.askstring("Password",
+                    f"Enter password for {sd.result['username']}@{sd.result['instance']}",
+                    show="*", parent=self)
+                if pwd: _set_password(sd.result["instance"], sd.result["username"], pwd)
+            self.servers.setdefault("servers", []).append(sd.result)
+            save_servers(self.servers)
+            self.refresh()
+
+    def edit_instance(self):
+        key = self._select_instance_key()
+        if not key: return
+        # find index
+        idx = next((i for i,s in enumerate(self.servers.get("servers", []))
+                    if s.get("instance")==key["instance"] and s.get("environment")==key["environment"]), None)
+        if idx is None:
+            messagebox.showerror("Edit", "Could not locate the selected instance in config."); return
+        current = self.servers["servers"][idx]
+        sd = ServerDialog(self, current)
+        self.wait_window(sd)
+        if sd.result:
+            if sd.result["auth"] == "sql" and sd.result.get("save_pwd") and keyring:
+                if messagebox.askyesno("Password", "Update stored password now?", parent=self):
+                    pwd = simpledialog.askstring("Password",
+                          f"Enter password for {sd.result['username']}@{sd.result['instance']}",
+                          show="*", parent=self)
+                    if pwd: _set_password(sd.result["instance"], sd.result["username"], pwd)
+            self.servers["servers"][idx] = sd.result
+            save_servers(self.servers)
+            self.refresh()
+
+    def remove_instance(self):
+        key = self._select_instance_key()
+        if not key: return
+        idx = next((i for i,s in enumerate(self.servers.get("servers", []))
+                    if s.get("instance")==key["instance"] and s.get("environment")==key["environment"]), None)
+        if idx is None:
+            messagebox.showerror("Remove", "Could not locate the selected instance in config."); return
+        inst = self.servers["servers"][idx].get("instance","")
+        if messagebox.askyesno("Remove", f"Remove '{inst}'?", parent=self):
+            self.servers["servers"].pop(idx)
+            save_servers(self.servers)
+            self.refresh()
+
+    # ---- Import/Export JSON ----
+    def import_json(self):
+        path = filedialog.askopenfilename(
+            title="Import servers.json",
+            filetypes=[("JSON", "*.json")]
         )
         if not path: return
         try:
-            import csv
-            with open(path, "w", newline="", encoding="utf-8") as f:
-                w = csv.writer(f); w.writerow(COLUMNS)
-                for r in self.data_rows: w.writerow([r.get(c,"") for c in COLUMNS])
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict) or "servers" not in data:
+                raise ValueError("Invalid JSON format: expected an object with 'servers' key.")
+            self.servers = {"servers": list(data["servers"])}
+            save_servers(self.servers)
+            messagebox.showinfo("Import", "Servers imported successfully.")
+            self.refresh()
+        except Exception as e:
+            messagebox.showerror("Import", str(e))
+
+    def export_json(self):
+        path = filedialog.asksaveasfilename(
+            title="Export servers.json",
+            defaultextension=".json",
+            filetypes=[("JSON", "*.json")],
+            initialfile="servers_export.json"
+        )
+        if not path: return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self.servers, f, indent=2)
             messagebox.showinfo("Export", f"Exported to:\n{path}")
         except Exception as e:
             messagebox.showerror("Export", str(e))
-
-    def manage_servers(self):
-        dlg = tk.Toplevel(self); dlg.title("Manage Servers"); dlg.geometry("720x380"); dlg.transient(self); dlg.grab_set()
-
-        cols = ("instance","environment","auth","username","save_pwd")
-        tv = ttk.Treeview(dlg, columns=cols, show="headings", selectmode="browse")
-        for c in cols:
-            tv.heading(c, text=c)
-            tv.column(c, width=150 if c!="instance" else 260, anchor="w")
-        tv.pack(fill="both", expand=True, padx=8, pady=8)
-
-        def reload_list():
-            tv.delete(*tv.get_children())
-            for s in self.servers.get("servers", []):
-                tv.insert("", "end", values=(s.get("instance",""), s.get("environment",""),
-                                             s.get("auth",""), s.get("username",""),
-                                             "Yes" if s.get("save_pwd") else "No"))
-
-        def add_server():
-            sd = ServerDialog(dlg)
-            self.wait_window(sd)
-            if sd.result:
-                if sd.result["auth"] == "sql" and sd.result.get("save_pwd") and keyring:
-                    pwd = simpledialog.askstring("Password",
-                        f"Enter password for {sd.result['username']}@{sd.result['instance']}",
-                        show="*", parent=dlg)
-                    if pwd: _set_password(sd.result["instance"], sd.result["username"], pwd)
-                self.servers.setdefault("servers", []).append(sd.result)
-                save_servers(self.servers); reload_list()
-
-        def edit_server():
-            sel = tv.selection()
-            if not sel: return
-            idx = tv.index(sel[0])
-            current = self.servers.get("servers", [])[idx]
-            sd = ServerDialog(dlg, current)
-            self.wait_window(sd)
-            if sd.result:
-                if sd.result["auth"] == "sql" and sd.result.get("save_pwd") and keyring:
-                    if messagebox.askyesno("Password", "Update stored password now?", parent=dlg):
-                        pwd = simpledialog.askstring("Password",
-                              f"Enter password for {sd.result['username']}@{sd.result['instance']}",
-                              show="*", parent=dlg)
-                        if pwd: _set_password(sd.result["instance"], sd.result["username"], pwd)
-                self.servers["servers"][idx] = sd.result
-                save_servers(self.servers); reload_list()
-
-        def delete_server():
-            sel = tv.selection()
-            if not sel: return
-            idx = tv.index(sel[0])
-            inst = self.servers.get("servers", [])[idx].get("instance","")
-            if messagebox.askyesno("Delete", f"Remove '{inst}'?", parent=dlg):
-                self.servers["servers"].pop(idx)
-                save_servers(self.servers); reload_list()
-
-        btns = ttk.Frame(dlg)
-        ttk.Button(btns, text="Add", command=add_server).pack(side="left", padx=5)
-        ttk.Button(btns, text="Edit", command=edit_server).pack(side="left", padx=5)
-        ttk.Button(btns, text="Delete", command=delete_server).pack(side="left", padx=5)
-        ttk.Button(btns, text="Close", command=dlg.destroy).pack(side="right", padx=5)
-        btns.pack(fill="x", padx=8, pady=(0,8))
-
-        reload_list()
-
-    def open_settings(self):
-        sd = SettingsDialog(self, self.settings)
-        self.wait_window(sd)
-        self.settings = load_settings()
-        if self._timer_id:
-            self.after_cancel(self._timer_id)
-        self._schedule_next()
 
 if __name__ == "__main__":
     App().mainloop()
