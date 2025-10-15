@@ -4,14 +4,9 @@ import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+import getpass
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
-
-# Optional secure password storage
-try:
-    import keyring
-except Exception:
-    keyring = None
 
 APP_NAME = "SQL Server Health Monitor (sqlcmd)"
 
@@ -28,9 +23,6 @@ DEFAULT_SETTINGS = {
     "sqlcmd_path": "sqlcmd",      # path or 'sqlcmd' if on PATH
     "separator": "|"
 }
-
-# in-memory password cache (not saved to disk)
-PWD_CACHE = {}  # key: (instance, username) -> password
 
 # ---------- Queries ----------
 Q_CORE = """
@@ -84,25 +76,13 @@ COLUMNS = [
 
 # ---- Config helpers ----
 def ensure_paths():
-    try:
-        os.makedirs(CONFIG_DIR, exist_ok=True)
-    except Exception as e:
-        messagebox.showerror("Config folder", f"Cannot create {CONFIG_DIR}\n{e}")
-        raise
+    os.makedirs(CONFIG_DIR, exist_ok=True)
     if not os.path.isfile(SERVERS_PATH):
-        try:
-            with open(SERVERS_PATH, "w", encoding="utf-8") as f:
-                json.dump({"servers": []}, f, indent=2)
-        except Exception as e:
-            messagebox.showerror("servers.json", f"Cannot write {SERVERS_PATH}\n{e}")
-            raise
+        with open(SERVERS_PATH, "w", encoding="utf-8") as f:
+            json.dump({"servers": []}, f, indent=2)
     if not os.path.isfile(SETTINGS_PATH):
-        try:
-            with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
-                json.dump(DEFAULT_SETTINGS, f, indent=2)
-        except Exception as e:
-            messagebox.showerror("settings.json", f"Cannot write {SETTINGS_PATH}\n{e}")
-            raise
+        with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+            json.dump(DEFAULT_SETTINGS, f, indent=2)
 
 def load_servers():
     ensure_paths()
@@ -130,6 +110,7 @@ def _sqlcmd_run(settings, instance, auth, username, password, query, sep):
     sqlcmd = settings.get("sqlcmd_path", "sqlcmd") or "sqlcmd"
     args = [sqlcmd, "-S", instance, "-W", "-h", "-1", "-s", sep, "-b", "-r", "1", "-Q", query]
     if auth == "windows":
+        # Always use current Windows logon session for -E
         args.insert(2, "-E")
     else:
         args.extend(["-U", username or ""])
@@ -149,36 +130,13 @@ def _sqlcmd_run(settings, instance, auth, username, password, query, sep):
     rows = [ln.split(sep) for ln in lines]
     return rows
 
-def _get_password(instance, username):
-    if instance and username and (instance, username) in PWD_CACHE:
-        return PWD_CACHE[(instance, username)]
-    if not keyring or not instance or not username:
-        return None
-    try:
-        return keyring.get_password(f"{APP_NAME}:{instance}", username)
-    except Exception:
-        return None
-
-def _set_password(instance, username, password, persist=False):
-    if not (instance and username and password):
-        return False
-    # Always cache in memory so the current session works even without saving
-    PWD_CACHE[(instance, username)] = password
-    if persist and keyring:
-        try:
-            keyring.set_password(f"{APP_NAME}:{instance}", username, password)
-            return True
-        except Exception:
-            return False
-    return True
-
 # ---- Health check ----
 def check_instance(settings, server):
     instance = (server.get("instance") or "").strip()
     env = server.get("environment", "")
     auth = server.get("auth", "windows")
     user = server.get("username") if auth == "sql" else None
-    save_pwd = bool(server.get("save_pwd")) if auth == "sql" else False
+    pwd  = server.get("password") if auth == "sql" else None
 
     row = {
         "S.No": 0,
@@ -196,17 +154,12 @@ def check_instance(settings, server):
         "Error": ""
     }
     try:
-        pwd = None
-        if auth == "sql":
-            pwd = _get_password(instance, user)
-            # If none saved, try a no-password connect; if server rejects, it will error out and show clear message
-            # (We do NOT block adding/editing—only the check will fail with a helpful error)
         sep = settings.get("separator", "|")
 
         core = _sqlcmd_run(settings, instance, auth, user, pwd, Q_CORE, sep)
         row["Instance Status"] = "Up"
         if core and len(core[0]) >= 2:
-            row["Version"] = core[0][0].strip()
+            row["Version"] = (core[0][0] or "").strip()
             row["CU"] = (core[0][1] or "").strip()
 
         dbc = _sqlcmd_run(settings, instance, auth, user, pwd, Q_DB_COUNTS, sep)
@@ -280,47 +233,66 @@ def check_instance(settings, server):
         row["Check Status"] = "CRIT"
         return row
 
-# ---- Dialogs ----
+# ---- Add/Edit dialog ----
 class ServerDialog(tk.Toplevel):
-    def __init__(self, master, server=None):
+    ENV_OPTIONS = ["NON-PROD", "PROD"]
+
+    def __init__(self, master, server=None, settings=None):
         super().__init__(master)
         self.title("Add / Edit Instance")
         self.resizable(False, False)
         self.result = None
+        self.settings = settings
         if master: self.transient(master)
 
-        data = server or {"instance":"", "environment":"", "auth":"windows", "username":"", "save_pwd": False}
+        current_windows_user = getpass.getuser()
+        data = server or {
+            "instance":"", "environment":"NON-PROD", "auth":"windows",
+            "windows_user": current_windows_user,
+            "username":"", "password":""
+        }
 
         r = 0
-        ttk.Label(self, text="Instance (SERVER or SERVER\\INSTANCE or tcp:server,port):").grid(row=r, column=0, sticky="w", padx=8, pady=(10,2)); r+=1
-        self.e_instance = ttk.Entry(self, width=44); self.e_instance.insert(0, data.get("instance",""))
+        ttk.Label(self, text="Instance (SERVER or SERVER\\INSTANCE or tcp:server,port):").grid(row=r, column=0, columnspan=2, sticky="w", padx=8, pady=(10,2)); r+=1
+        self.e_instance = ttk.Entry(self, width=46); self.e_instance.insert(0, data.get("instance",""))
         self.e_instance.grid(row=r, column=0, columnspan=2, padx=8, pady=2, sticky="we"); r+=1
 
-        ttk.Label(self, text="Environment:").grid(row=r, column=0, sticky="w", padx=8, pady=(6,2)); r+=1
-        self.e_env = ttk.Entry(self, width=20); self.e_env.insert(0, data.get("environment",""))
-        self.e_env.grid(row=r, column=0, padx=8, pady=2, sticky="w"); r+=1
+        ttk.Label(self, text="Environment:").grid(row=r, column=0, sticky="w", padx=8, pady=(6,2))
+        self.env_var = tk.StringVar(value=data.get("environment","NON-PROD"))
+        self.dd_env = ttk.Combobox(self, textvariable=self.env_var, values=self.ENV_OPTIONS, state="readonly", width=12)
+        self.dd_env.grid(row=r, column=1, sticky="w", padx=8, pady=(6,2)); r+=1
 
         ttk.Label(self, text="Authentication:").grid(row=r, column=0, sticky="w", padx=8, pady=(6,2)); r+=1
         self.auth_var = tk.StringVar(value=data.get("auth","windows"))
-        ttk.Radiobutton(self, text="Windows (AD) - current user", variable=self.auth_var, value="windows", command=self._toggle).grid(row=r, column=0, sticky="w", padx=8); r+=1
+        ttk.Radiobutton(self, text="Windows (Integrated / SSPI)", variable=self.auth_var, value="windows", command=self._toggle).grid(row=r, column=0, sticky="w", padx=8); r+=1
         ttk.Radiobutton(self, text="SQL Login", variable=self.auth_var, value="sql", command=self._toggle).grid(row=r, column=0, sticky="w", padx=8); r+=1
 
+        # Windows login (display + editable, saved in JSON for reference)
+        self.frm_win = ttk.Frame(self)
+        ttk.Label(self.frm_win, text="Windows login (display only):").grid(row=0, column=0, sticky="w")
+        self.e_winuser = ttk.Entry(self.frm_win, width=30)
+        self.e_winuser.insert(0, data.get("windows_user", current_windows_user))
+        self.e_winuser.grid(row=0, column=1, sticky="w", padx=6, pady=2)
+        self.frm_win.grid(row=r, column=0, columnspan=2, padx=8, pady=2, sticky="we"); r+=1
+
+        # SQL login panel
         self.frm_sql = ttk.Frame(self)
         ttk.Label(self.frm_sql, text="SQL Username:").grid(row=0, column=0, sticky="w")
         self.e_user = ttk.Entry(self.frm_sql, width=26); self.e_user.insert(0, data.get("username",""))
         self.e_user.grid(row=0, column=1, sticky="w", padx=6, pady=2)
 
-        ttk.Label(self.frm_sql, text="Password (won't be saved unless you tick Save):").grid(row=1, column=0, sticky="w")
-        self.e_pwd = ttk.Entry(self.frm_sql, width=26, show="*"); self.e_pwd.grid(row=1, column=1, sticky="w", padx=6, pady=2)
+        ttk.Label(self.frm_sql, text="SQL Password (stored in JSON):").grid(row=1, column=0, sticky="w")
+        self.e_pwd = ttk.Entry(self.frm_sql, width=26, show="*"); self.e_pwd.insert(0, data.get("password",""))
+        self.e_pwd.grid(row=1, column=1, sticky="w", padx=6, pady=2)
 
-        self.save_pwd_var = tk.BooleanVar(value=bool(data.get("save_pwd", False)))
-        ttk.Checkbutton(self.frm_sql, text="Save password to Credential Manager", variable=self.save_pwd_var).grid(row=2, column=0, columnspan=2, sticky="w", pady=(2,8))
-        self.frm_sql.grid(row=r, column=0, padx=8, pady=2, sticky="we"); r+=1
+        self.frm_sql.grid(row=r, column=0, columnspan=2, padx=8, pady=2, sticky="we"); r+=1
 
+        # Buttons
         btns = ttk.Frame(self)
-        ttk.Button(btns, text="OK", command=self._ok).grid(row=0, column=0, padx=6)
-        ttk.Button(btns, text="Cancel", command=self.destroy).grid(row=0, column=1, padx=6)
-        btns.grid(row=r, column=0, pady=10)
+        ttk.Button(btns, text="Test Connection", command=self._test_connection).grid(row=0, column=0, padx=6)
+        ttk.Button(btns, text="OK", command=self._ok).grid(row=0, column=1, padx=6)
+        ttk.Button(btns, text="Cancel", command=self.destroy).grid(row=0, column=2, padx=6)
+        btns.grid(row=r, column=0, columnspan=2, pady=10)
 
         self._toggle()
         self.update_idletasks()
@@ -329,31 +301,46 @@ class ServerDialog(tk.Toplevel):
 
     def _toggle(self):
         is_sql = (self.auth_var.get() == "sql")
+        # Windows panel always visible (for display/edit as requested)
         state = "normal" if is_sql else "disabled"
-        self.frm_sql.configure(state=state)
-        for w in self.frm_sql.winfo_children(): w.configure(state=state)
+        for w in self.frm_sql.winfo_children():
+            w.configure(state=state)
+
+    def _collect(self):
+        return {
+            "instance": self.e_instance.get().strip(),
+            "environment": self.env_var.get().strip(),
+            "auth": self.auth_var.get(),
+            "windows_user": self.e_winuser.get().strip(),
+            "username": self.e_user.get().strip() if self.auth_var.get()=="sql" else "",
+            "password": self.e_pwd.get() if self.auth_var.get()=="sql" else ""
+        }
+
+    def _test_connection(self):
+        vals = self._collect()
+        if not vals["instance"]:
+            messagebox.showerror("Test", "Instance is required.")
+            return
+        if vals["auth"] == "sql" and not vals["username"]:
+            messagebox.showerror("Test", "SQL username is required for SQL auth.")
+            return
+        try:
+            # Use a very small query for connectivity
+            sep = (self.settings or DEFAULT_SETTINGS).get("separator", "|")
+            _sqlcmd_run(self.settings or DEFAULT_SETTINGS, vals["instance"], vals["auth"],
+                        vals["username"], vals["password"], "SET NOCOUNT ON; SELECT 1;", sep)
+            messagebox.showinfo("Test Connection", "Connection successful.")
+        except Exception as e:
+            # Show full error text
+            messagebox.showerror("Test Connection Failed", str(e))
 
     def _ok(self):
-        instance = self.e_instance.get().strip()
-        env = self.e_env.get().strip()
-        auth = self.auth_var.get()
-        user = self.e_user.get().strip() if auth == "sql" else ""
-        pwd  = self.e_pwd.get() if auth == "sql" else ""
-        savep= bool(self.save_pwd_var.get()) if auth == "sql" else False
-
-        if not instance:
+        vals = self._collect()
+        if not vals["instance"]:
             messagebox.showerror("Error", "Instance is required."); return
-        if auth == "sql" and not user:
+        if vals["auth"] == "sql" and not vals["username"]:
             messagebox.showerror("Error", "SQL username is required for SQL auth."); return
-
-        # Update in-memory cache and optionally the keyring
-        if auth == "sql" and pwd:
-            _set_password(instance, user, pwd, persist=savep)
-
-        self.result = {
-            "instance": instance, "environment": env, "auth": auth,
-            "username": user if auth == "sql" else "", "save_pwd": savep
-        }
+        self.result = vals
         self.destroy()
 
 # ---- App ----
@@ -507,7 +494,7 @@ class App(tk.Tk):
 
     # ---- Instance CRUD ----
     def add_instance(self):
-        sd = ServerDialog(self)
+        sd = ServerDialog(self, settings=self.settings)
         self.wait_window(sd)
         if sd.result:
             self.servers.setdefault("servers", []).append(sd.result)
@@ -528,7 +515,7 @@ class App(tk.Tk):
             messagebox.showerror("Edit", "Could not locate the selected instance in config.")
             return
         current = self.servers["servers"][idx]
-        sd = ServerDialog(self, current)
+        sd = ServerDialog(self, current, settings=self.settings)
         self.wait_window(sd)
         if sd.result:
             self.servers["servers"][idx] = sd.result
