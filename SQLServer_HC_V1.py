@@ -5,7 +5,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog, simpledialog
+from tkinter import ttk, messagebox, filedialog
 
 # Optional secure password storage
 try:
@@ -28,6 +28,9 @@ DEFAULT_SETTINGS = {
     "sqlcmd_path": "sqlcmd",      # path or 'sqlcmd' if on PATH
     "separator": "|"
 }
+
+# in-memory password cache (not saved to disk)
+PWD_CACHE = {}  # key: (instance, username) -> password
 
 # ---------- Queries ----------
 Q_CORE = """
@@ -81,13 +84,25 @@ COLUMNS = [
 
 # ---- Config helpers ----
 def ensure_paths():
-    os.makedirs(CONFIG_DIR, exist_ok=True)
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+    except Exception as e:
+        messagebox.showerror("Config folder", f"Cannot create {CONFIG_DIR}\n{e}")
+        raise
     if not os.path.isfile(SERVERS_PATH):
-        with open(SERVERS_PATH, "w", encoding="utf-8") as f:
-            json.dump({"servers": []}, f, indent=2)
+        try:
+            with open(SERVERS_PATH, "w", encoding="utf-8") as f:
+                json.dump({"servers": []}, f, indent=2)
+        except Exception as e:
+            messagebox.showerror("servers.json", f"Cannot write {SERVERS_PATH}\n{e}")
+            raise
     if not os.path.isfile(SETTINGS_PATH):
-        with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
-            json.dump(DEFAULT_SETTINGS, f, indent=2)
+        try:
+            with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+                json.dump(DEFAULT_SETTINGS, f, indent=2)
+        except Exception as e:
+            messagebox.showerror("settings.json", f"Cannot write {SETTINGS_PATH}\n{e}")
+            raise
 
 def load_servers():
     ensure_paths()
@@ -122,7 +137,7 @@ def _sqlcmd_run(settings, instance, auth, username, password, query, sep):
     try:
         res = subprocess.run(args, capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace")
     except FileNotFoundError:
-        raise RuntimeError("sqlcmd not found. Set a valid path near top of file or install it.")
+        raise RuntimeError("sqlcmd not found. Install it or set a valid path in Settings.")
     except subprocess.TimeoutExpired:
         raise RuntimeError("sqlcmd timed out")
 
@@ -135,17 +150,27 @@ def _sqlcmd_run(settings, instance, auth, username, password, query, sep):
     return rows
 
 def _get_password(instance, username):
-    if not keyring: return None
-    try: return keyring.get_password(f"{APP_NAME}:{instance}", username)
-    except Exception: return None
-
-def _set_password(instance, username, password):
-    if not keyring: return False
+    if instance and username and (instance, username) in PWD_CACHE:
+        return PWD_CACHE[(instance, username)]
+    if not keyring or not instance or not username:
+        return None
     try:
-        keyring.set_password(f"{APP_NAME}:{instance}", username, password)
-        return True
+        return keyring.get_password(f"{APP_NAME}:{instance}", username)
     except Exception:
+        return None
+
+def _set_password(instance, username, password, persist=False):
+    if not (instance and username and password):
         return False
+    # Always cache in memory so the current session works even without saving
+    PWD_CACHE[(instance, username)] = password
+    if persist and keyring:
+        try:
+            keyring.set_password(f"{APP_NAME}:{instance}", username, password)
+            return True
+        except Exception:
+            return False
+    return True
 
 # ---- Health check ----
 def check_instance(settings, server):
@@ -171,10 +196,11 @@ def check_instance(settings, server):
         "Error": ""
     }
     try:
-        pwd = _get_password(instance, user) if auth == "sql" else None
-        if auth == "sql" and (not pwd):
-            raise RuntimeError("No stored SQL password. Use Add/Edit → save password to Credential Manager.")
-
+        pwd = None
+        if auth == "sql":
+            pwd = _get_password(instance, user)
+            # If none saved, try a no-password connect; if server rejects, it will error out and show clear message
+            # (We do NOT block adding/editing—only the check will fail with a helpful error)
         sep = settings.get("separator", "|")
 
         core = _sqlcmd_run(settings, instance, auth, user, pwd, Q_CORE, sep)
@@ -184,8 +210,11 @@ def check_instance(settings, server):
             row["CU"] = (core[0][1] or "").strip()
 
         dbc = _sqlcmd_run(settings, instance, auth, user, pwd, Q_DB_COUNTS, sep)
-        totaldb = int(dbc[0][0]) if dbc and dbc[0][0].isdigit() else 0
-        onlinedb = int(dbc[0][1]) if dbc and dbc[0][1].isdigit() else 0
+        try:
+            totaldb = int(float(dbc[0][0])) if dbc and dbc[0][0] else 0
+            onlinedb = int(float(dbc[0][1])) if dbc and dbc[0][1] else 0
+        except Exception:
+            totaldb, onlinedb = 0, 0
         row["totaldatabases/online databases"] = f"{totaldb}/{onlinedb}"
 
         try:
@@ -219,7 +248,7 @@ def check_instance(settings, server):
             crit = True; notes.append("Instance Down")
         if row["Agent Status"] == "Stopped":
             warn = True; notes.append("Agent Stopped")
-        if totaldb > onlinedb:
+        if 'totaldb' in locals() and totaldb > onlinedb:
             warn = True; notes.append("Some DBs not ONLINE")
 
         if row["Oldest date of Last full backup of db"]:
@@ -244,11 +273,8 @@ def check_instance(settings, server):
 
         row["Check Status"] = "CRIT" if crit else ("WARN" if warn else "OK")
         row["Error"] = "; ".join(notes)
-
-        if auth == "sql" and save_pwd and pwd:
-            _set_password(instance, user, pwd)
-
         return row
+
     except Exception as e:
         row["Error"] = str(e)
         row["Check Status"] = "CRIT"
@@ -258,7 +284,7 @@ def check_instance(settings, server):
 class ServerDialog(tk.Toplevel):
     def __init__(self, master, server=None):
         super().__init__(master)
-        self.title("Server")
+        self.title("Add / Edit Instance")
         self.resizable(False, False)
         self.result = None
         if master: self.transient(master)
@@ -283,8 +309,12 @@ class ServerDialog(tk.Toplevel):
         ttk.Label(self.frm_sql, text="SQL Username:").grid(row=0, column=0, sticky="w")
         self.e_user = ttk.Entry(self.frm_sql, width=26); self.e_user.insert(0, data.get("username",""))
         self.e_user.grid(row=0, column=1, sticky="w", padx=6, pady=2)
+
+        ttk.Label(self.frm_sql, text="Password (won't be saved unless you tick Save):").grid(row=1, column=0, sticky="w")
+        self.e_pwd = ttk.Entry(self.frm_sql, width=26, show="*"); self.e_pwd.grid(row=1, column=1, sticky="w", padx=6, pady=2)
+
         self.save_pwd_var = tk.BooleanVar(value=bool(data.get("save_pwd", False)))
-        ttk.Checkbutton(self.frm_sql, text="Save password (Credential Manager)", variable=self.save_pwd_var).grid(row=1, column=0, columnspan=2, sticky="w", pady=(2,8))
+        ttk.Checkbutton(self.frm_sql, text="Save password to Credential Manager", variable=self.save_pwd_var).grid(row=2, column=0, columnspan=2, sticky="w", pady=(2,8))
         self.frm_sql.grid(row=r, column=0, padx=8, pady=2, sticky="we"); r+=1
 
         btns = ttk.Frame(self)
@@ -308,15 +338,21 @@ class ServerDialog(tk.Toplevel):
         env = self.e_env.get().strip()
         auth = self.auth_var.get()
         user = self.e_user.get().strip() if auth == "sql" else ""
+        pwd  = self.e_pwd.get() if auth == "sql" else ""
+        savep= bool(self.save_pwd_var.get()) if auth == "sql" else False
+
         if not instance:
-            messagebox.showerror("Error", "Instance is required.")
-            return
+            messagebox.showerror("Error", "Instance is required."); return
         if auth == "sql" and not user:
-            messagebox.showerror("Error", "SQL username is required for SQL auth.")
-            return
+            messagebox.showerror("Error", "SQL username is required for SQL auth."); return
+
+        # Update in-memory cache and optionally the keyring
+        if auth == "sql" and pwd:
+            _set_password(instance, user, pwd, persist=savep)
+
         self.result = {
             "instance": instance, "environment": env, "auth": auth,
-            "username": user if auth == "sql" else "", "save_pwd": bool(self.save_pwd_var.get()) if auth == "sql" else False
+            "username": user if auth == "sql" else "", "save_pwd": savep
         }
         self.destroy()
 
@@ -455,77 +491,82 @@ class App(tk.Tk):
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.set_status(f"Instances: {len(self.data_rows)} | Refreshed: {ts}")
 
-    # ---- Instance CRUD ----
-    def _select_instance_key(self):
+    # ---- Helpers ----
+    def _selected_key(self):
         sel = self.tree.selection()
         if not sel:
-            messagebox.showinfo("Select", "Select a row first.")
             return None
         vals = self.tree.item(sel[0], "values")
-        # We use instance + environment to find the server entry
-        return {"instance": vals[1], "environment": vals[2]}
+        return {"instance": vals[1], "environment": vals[2]}  # tuple key
 
+    def _find_index(self, key):
+        for i, s in enumerate(self.servers.get("servers", [])):
+            if s.get("instance")==key["instance"] and s.get("environment")==key["environment"]:
+                return i
+        return None
+
+    # ---- Instance CRUD ----
     def add_instance(self):
         sd = ServerDialog(self)
         self.wait_window(sd)
         if sd.result:
-            # Optionally prompt to save password now
-            if sd.result["auth"] == "sql" and sd.result.get("save_pwd") and keyring:
-                pwd = simpledialog.askstring("Password",
-                    f"Enter password for {sd.result['username']}@{sd.result['instance']}",
-                    show="*", parent=self)
-                if pwd: _set_password(sd.result["instance"], sd.result["username"], pwd)
             self.servers.setdefault("servers", []).append(sd.result)
-            save_servers(self.servers)
+            try:
+                save_servers(self.servers)
+            except Exception as e:
+                messagebox.showerror("Save", f"Failed to save servers.json\n{e}")
+                return
             self.refresh()
 
     def edit_instance(self):
-        key = self._select_instance_key()
-        if not key: return
-        # find index
-        idx = next((i for i,s in enumerate(self.servers.get("servers", []))
-                    if s.get("instance")==key["instance"] and s.get("environment")==key["environment"]), None)
+        key = self._selected_key()
+        if not key:
+            messagebox.showinfo("Edit", "Select a row first.")
+            return
+        idx = self._find_index(key)
         if idx is None:
-            messagebox.showerror("Edit", "Could not locate the selected instance in config."); return
+            messagebox.showerror("Edit", "Could not locate the selected instance in config.")
+            return
         current = self.servers["servers"][idx]
         sd = ServerDialog(self, current)
         self.wait_window(sd)
         if sd.result:
-            if sd.result["auth"] == "sql" and sd.result.get("save_pwd") and keyring:
-                if messagebox.askyesno("Password", "Update stored password now?", parent=self):
-                    pwd = simpledialog.askstring("Password",
-                          f"Enter password for {sd.result['username']}@{sd.result['instance']}",
-                          show="*", parent=self)
-                    if pwd: _set_password(sd.result["instance"], sd.result["username"], pwd)
             self.servers["servers"][idx] = sd.result
-            save_servers(self.servers)
+            try:
+                save_servers(self.servers)
+            except Exception as e:
+                messagebox.showerror("Save", f"Failed to save servers.json\n{e}")
+                return
             self.refresh()
 
     def remove_instance(self):
-        key = self._select_instance_key()
-        if not key: return
-        idx = next((i for i,s in enumerate(self.servers.get("servers", []))
-                    if s.get("instance")==key["instance"] and s.get("environment")==key["environment"]), None)
+        key = self._selected_key()
+        if not key:
+            messagebox.showinfo("Remove", "Select a row first.")
+            return
+        idx = self._find_index(key)
         if idx is None:
-            messagebox.showerror("Remove", "Could not locate the selected instance in config."); return
+            messagebox.showerror("Remove", "Could not locate the selected instance in config.")
+            return
         inst = self.servers["servers"][idx].get("instance","")
-        if messagebox.askyesno("Remove", f"Remove '{inst}'?", parent=self):
+        if messagebox.askyesno("Remove", f"Remove '{inst}'?"):
             self.servers["servers"].pop(idx)
-            save_servers(self.servers)
+            try:
+                save_servers(self.servers)
+            except Exception as e:
+                messagebox.showerror("Save", f"Failed to save servers.json\n{e}")
+                return
             self.refresh()
 
     # ---- Import/Export JSON ----
     def import_json(self):
-        path = filedialog.askopenfilename(
-            title="Import servers.json",
-            filetypes=[("JSON", "*.json")]
-        )
+        path = filedialog.askopenfilename(title="Import servers.json", filetypes=[("JSON", "*.json")])
         if not path: return
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if not isinstance(data, dict) or "servers" not in data:
-                raise ValueError("Invalid JSON format: expected an object with 'servers' key.")
+                raise ValueError("Invalid JSON: expected object with 'servers' key.")
             self.servers = {"servers": list(data["servers"])}
             save_servers(self.servers)
             messagebox.showinfo("Import", "Servers imported successfully.")
