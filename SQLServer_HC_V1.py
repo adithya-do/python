@@ -1,36 +1,93 @@
 import json
 import os
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog, filedialog
+from tkinter import ttk, messagebox, filedialog
 
-# Third-party
-import pyodbc
+# --- DB driver (no ODBC) ---
+import pytds
+from pytds import login
+
 try:
     import keyring
 except ImportError:
-    keyring = None  # optional; we handle gracefully
+    keyring = None  # optional
 
-APP_NAME = "SQL Server Health Monitor"
+APP_NAME = "SQL Server Health Monitor (python-tds)"
 CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config")
 SERVERS_PATH = os.path.join(CONFIG_DIR, "servers.json")
 SETTINGS_PATH = os.path.join(CONFIG_DIR, "settings.json")
 
 DEFAULT_SETTINGS = {
-    "refresh_minutes": 5,      # not auto-used; manual Refresh button provided; you can wire a timer later
     "backup_warn_days": 2,
     "backup_crit_days": 4,
     "disk_warn_pct": 85,
     "disk_crit_pct": 92,
     "max_workers": 12,
-    "odbc_driver": "ODBC Driver 18 for SQL Server",  # 18 preferred; change to 17 if needed
-    "trust_server_cert": True
+    "encrypt": True,              # TDS encryption on
+    "trust_server_cert": True,    # if True, skip host validation (like TrustServerCertificate)
+    "port": 1433,
+    "tds_version": "7.4"          # 7.3/7.4 are fine for modern SQL Server
 }
 
-# -------------- Utilities: config load/save ----------------
+Q_CORE = """
+SELECT
+  CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(50)) AS ProductVersion,
+  CAST(SERVERPROPERTY('ProductUpdateLevel') AS nvarchar(50)) AS ProductUpdateLevel
+"""
+Q_DB_COUNTS = """
+SELECT COUNT(*) AS totaldb,
+       SUM(CASE WHEN state_desc='ONLINE' THEN 1 ELSE 0 END) AS onlinedb
+FROM sys.databases
+"""
+Q_AGENT = """
+SELECT TOP 1 status_desc
+FROM sys.dm_server_services
+WHERE servicename LIKE 'SQL Server Agent%'
+"""
+Q_BACKUP = """
+;WITH lastfull AS (
+  SELECT bs.database_name, MAX(bs.backup_finish_date) AS last_full_backup_finish_date
+  FROM msdb.dbo.backupset bs
+  WHERE bs.type = 'D'
+  GROUP BY bs.database_name
+)
+SELECT MIN(last_full_backup_finish_date) AS oldest_full_backup
+FROM lastfull
+"""
+Q_DISK = """
+;WITH vols AS (
+  SELECT DISTINCT
+    vs.volume_mount_point,
+    vs.total_bytes,
+    vs.available_bytes,
+    CAST(100.0 - (100.0 * vs.available_bytes / NULLIF(vs.total_bytes,0)) AS decimal(5,2)) AS used_pct
+  FROM sys.master_files mf
+  CROSS APPLY sys.dm_os_volume_stats(mf.database_id, mf.file_id) vs
+)
+SELECT TOP 1 volume_mount_point, total_bytes, available_bytes, used_pct
+FROM vols
+ORDER BY used_pct DESC
+"""
+
+COLUMNS = [
+    "S.No",
+    "SQL Server Instance",
+    "Environment",
+    "Version",
+    "CU",
+    "Instance Status",
+    "Agent Status",
+    "totaldatabases/online databases",
+    "Oldest date of Last full backup of db",
+    "Disk size with %",
+    "Last checked",
+    "Check Status",
+    "Error"
+]
+
 def ensure_paths():
     if not os.path.isdir(CONFIG_DIR):
         os.makedirs(CONFIG_DIR, exist_ok=True)
@@ -54,7 +111,6 @@ def load_settings():
     ensure_paths()
     with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
         s = json.load(f)
-    # backfill defaults if keys missing
     for k, v in DEFAULT_SETTINGS.items():
         s.setdefault(k, v)
     return s
@@ -62,69 +118,6 @@ def load_settings():
 def save_settings(settings):
     with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
         json.dump(settings, f, indent=2)
-
-# -------------- DB queries ----------------
-Q_CORE = """
-SELECT
-  CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(50)) AS ProductVersion,
-  CAST(SERVERPROPERTY('ProductUpdateLevel') AS nvarchar(50)) AS ProductUpdateLevel
-"""
-
-Q_DB_COUNTS = """
-SELECT
-  COUNT(*) AS totaldb,
-  SUM(CASE WHEN state_desc='ONLINE' THEN 1 ELSE 0 END) AS onlinedb
-FROM sys.databases
-"""
-
-Q_AGENT = """
-SELECT TOP 1 status_desc
-FROM sys.dm_server_services
-WHERE servicename LIKE 'SQL Server Agent%'
-"""
-
-Q_BACKUP = """
-;WITH lastfull AS (
-  SELECT bs.database_name, MAX(bs.backup_finish_date) AS last_full_backup_finish_date
-  FROM msdb.dbo.backupset bs
-  WHERE bs.type = 'D'
-  GROUP BY bs.database_name
-)
-SELECT MIN(last_full_backup_finish_date) AS oldest_full_backup
-FROM lastfull
-"""
-
-Q_DISK = """
-;WITH vols AS (
-  SELECT DISTINCT
-    vs.volume_mount_point,
-    vs.total_bytes,
-    vs.available_bytes,
-    CAST(100.0 - (100.0 * vs.available_bytes / NULLIF(vs.total_bytes,0)) AS decimal(5,2)) AS used_pct
-  FROM sys.master_files mf
-  CROSS APPLY sys.dm_os_volume_stats(mf.database_id, mf.file_id) vs
-)
-SELECT TOP 1 volume_mount_point, total_bytes, available_bytes, used_pct
-FROM vols
-ORDER BY used_pct DESC
-"""
-
-def make_conn_str(settings, instance, auth, username=None, password=None):
-    driver = settings.get("odbc_driver", "ODBC Driver 18 for SQL Server")
-    trust = settings.get("trust_server_cert", True)
-    trust_part = "Yes" if trust else "No"
-    if auth == "windows":
-        return (
-            f"DRIVER={{{driver}}};SERVER={instance};DATABASE=master;"
-            f"Trusted_Connection=Yes;TrustServerCertificate={trust_part};"
-        )
-    else:
-        if username is None or password is None:
-            raise ValueError("Username/password required for SQL authentication.")
-        return (
-            f"DRIVER={{{driver}}}};SERVER={instance};DATABASE=master;"
-            f"UID={username};PWD={password};TrustServerCertificate={trust_part};"
-        )
 
 def get_sql_password_from_keyring(instance, username):
     if keyring is None:
@@ -140,22 +133,51 @@ def set_sql_password_in_keyring(instance, username, password):
     except Exception:
         return False
 
+def connect_pytds(settings, instance, auth, username=None, password=None):
+    """
+    Returns a live pytds connection (autocommit=True).
+    auth='windows' uses SSPI (your AD identity).
+    auth='sql' uses provided username/password (from keyring if saved).
+    """
+    enc = bool(settings.get("encrypt", True))
+    trust = bool(settings.get("trust_server_cert", True))
+    port = int(settings.get("port", 1433))
+    tds_ver = settings.get("tds_version", "7.4")
+
+    # Map version string to pytds constant if needed (fallback to default)
+    tds_version_map = {"7.3": pytds.tds_base.TDS73, "7.4": pytds.tds_base.TDS74}
+    tds_const = tds_version_map.get(tds_ver, pytds.tds_base.TDS74)
+
+    if auth == "windows":
+        # SSPI auth uses current Windows user
+        return pytds.connect(
+            server=instance, database="master", auth=login.SSPI(),
+            autocommit=True, port=port, tds_version=tds_const,
+            encrypt=enc, validate_host=not trust
+        )
+    else:
+        if not (username and password):
+            raise ValueError("SQL authentication requires username and password.")
+        return pytds.connect(
+            server=instance, database="master", user=username, password=password,
+            autocommit=True, port=port, tds_version=tds_const,
+            encrypt=enc, validate_host=not trust
+        )
+
 def test_instance(settings, server):
     """
-    server dict:
-      {
-        "instance": "HOST\\NAME",
-        "environment": "PROD",
-        "auth": "windows"|"sql",
-        "username": "user" (only for sql),
-        "save_pwd": true|false
-      }
+    server: {
+      "instance": "HOST\\INSTANCE" or "HOST",
+      "environment": "PROD|UAT|DEV|...",
+      "auth": "windows"|"sql",
+      "username": "...",            # only for sql
+      "save_pwd": true|false
+    }
     """
-    instance = server.get("instance", "").strip()
+    instance = (server.get("instance") or "").strip()
     env = server.get("environment", "")
     auth = server.get("auth", "windows")
-    username = server.get("username")
-    show_error = ""
+    username = server.get("username") if auth == "sql" else None
 
     row = {
         "S.No": 0,
@@ -175,134 +197,99 @@ def test_instance(settings, server):
 
     try:
         pwd = None
-        if auth == "sql":
-            # Try keyring first
-            pwd = get_sql_password_from_keyring(instance, username) if username else None
+        if auth == "sql" and username:
+            pwd = get_sql_password_from_keyring(instance, username)
 
-        conn_str = make_conn_str(settings, instance, auth, username, pwd) if auth == "sql" else make_conn_str(settings, instance, "windows")
-        cn = pyodbc.connect(conn_str, timeout=15, autocommit=True)
-        row["Instance Status"] = "Up"
+        with connect_pytds(settings, instance, auth, username, pwd) as cn:
+            row["Instance Status"] = "Up"
+            cur = cn.cursor()
 
-        # Core
-        cur = cn.cursor()
-        ver, cu = "", ""
-        for r in cur.execute(Q_CORE):
-            ver = (r.ProductVersion or "").strip()
-            cu  = (r.ProductUpdateLevel or "").strip()
-        row["Version"] = ver
-        row["CU"] = cu
-
-        # DB counts
-        totaldb, onlinedb = 0, 0
-        for r in cur.execute(Q_DB_COUNTS):
-            totaldb = int(r.totaldb or 0); onlinedb = int(r.onlinedb or 0)
-        row["totaldatabases/online databases"] = f"{totaldb}/{onlinedb}"
-
-        # Agent
-        try:
-            ag = None
-            for r in cur.execute(Q_AGENT):
-                ag = r.status_desc
-                break
-            row["Agent Status"] = ag if ag else "Unknown"
-        except Exception:
-            row["Agent Status"] = "Unknown"
-
-        # Oldest full backup
-        oldest = None
-        for r in cur.execute(Q_BACKUP):
-            oldest = r.oldest_full_backup
-        if oldest:
-            # format nice
-            if isinstance(oldest, datetime):
-                row["Oldest date of Last full backup of db"] = oldest.strftime("%Y-%m-%d %H:%M:%S")
-            else:
-                # pyodbc may return date-like; cast
-                row["Oldest date of Last full backup of db"] = str(oldest)
-        else:
-            row["Oldest date of Last full backup of db"] = ""
-
-        # Disk worst usage
-        worst_pct = None
-        try:
-            r = cur.execute(Q_DISK).fetchone()
+            # Core
+            cur.execute(Q_CORE)
+            r = cur.fetchone()
             if r:
-                mp = r.volume_mount_point
-                tot = float(r.total_bytes or 0.0)
-                av  = float(r.available_bytes or 0.0)
-                used = float(r.used_pct or 0.0)
-                tot_gb = round(tot/ (1024**3), 2) if tot else 0.0
-                used_gb = round((tot-av)/ (1024**3), 2) if tot else 0.0
-                row["Disk size with %"] = f"{mp} {used_gb}/{tot_gb} GB ({used}%)"
-                worst_pct = used
-        except Exception:
-            pass
+                row["Version"] = (r[0] or "").strip()
+                row["CU"] = (r[1] or "").strip()
 
-        # Status logic
-        s = settings
-        crit, warn = False, False
-        notes = []
+            # DB counts
+            cur.execute(Q_DB_COUNTS)
+            r = cur.fetchone()
+            totaldb = int(r[0] or 0) if r else 0
+            onlinedb = int(r[1] or 0) if r else 0
+            row["totaldatabases/online databases"] = f"{totaldb}/{onlinedb}"
 
-        if row["Instance Status"] != "Up":
-            crit = True; notes.append("Instance Down")
-
-        if row["Agent Status"] == "Stopped":
-            warn = True; notes.append("Agent Stopped")
-
-        if totaldb > onlinedb:
-            warn = True; notes.append("Some DBs not ONLINE")
-
-        # backup age
-        if row["Oldest date of Last full backup of db"]:
+            # Agent
             try:
-                dt = datetime.strptime(row["Oldest date of Last full backup of db"], "%Y-%m-%d %H:%M:%S")
-                days = (datetime.now() - dt).days
-                if days >= s["backup_crit_days"]:
-                    crit = True; notes.append(f"Oldest full backup {days}d")
-                elif days >= s["backup_warn_days"]:
-                    warn = True; notes.append(f"Oldest full backup {days}d")
+                cur.execute(Q_AGENT)
+                r = cur.fetchone()
+                row["Agent Status"] = r[0] if r and r[0] else "Unknown"
             except Exception:
-                warn = True; notes.append("Backup date parse")
-        else:
-            warn = True; notes.append("No full backups found")
+                row["Agent Status"] = "Unknown"
 
-        if worst_pct is not None:
-            if worst_pct >= s["disk_crit_pct"]:
-                crit = True; notes.append(f"Disk {worst_pct}%")
-            elif worst_pct >= s["disk_warn_pct"]:
-                warn = True; notes.append(f"Disk {worst_pct}%")
+            # Oldest full backup
+            cur.execute(Q_BACKUP)
+            r = cur.fetchone()
+            oldest = r[0] if r else None
+            if oldest:
+                # pytds returns datetime for datetime columns
+                if isinstance(oldest, datetime):
+                    row["Oldest date of Last full backup of db"] = oldest.strftime("%Y-%m-%d %H:%M:%S")
+                else:
+                    row["Oldest date of Last full backup of db"] = str(oldest)
 
-        row["Check Status"] = "CRIT" if crit else ("WARN" if warn else "OK")
-        row["Error"] = "; ".join(notes)
-        cn.close()
+            # Disk worst usage
+            worst_pct = None
+            try:
+                cur.execute(Q_DISK)
+                r = cur.fetchone()
+                if r:
+                    mp, total_bytes, available_bytes, used_pct = r[0], float(r[1] or 0), float(r[2] or 0), float(r[3] or 0.0)
+                    tot_gb = round(total_bytes / (1024**3), 2) if total_bytes else 0.0
+                    used_gb = round((total_bytes - available_bytes) / (1024**3), 2) if total_bytes else 0.0
+                    row["Disk size with %"] = f"{mp} {used_gb}/{tot_gb} GB ({used_pct}%)"
+                    worst_pct = used_pct
+            except Exception:
+                pass
+
+            # status logic
+            notes, crit, warn = [], False, False
+            if row["Instance Status"] != "Up":
+                crit = True; notes.append("Instance Down")
+            if row["Agent Status"] == "Stopped":
+                warn = True; notes.append("Agent Stopped")
+            if totaldb > onlinedb:
+                warn = True; notes.append("Some DBs not ONLINE")
+
+            if row["Oldest date of Last full backup of db"]:
+                try:
+                    dt = datetime.strptime(row["Oldest date of Last full backup of db"], "%Y-%m-%d %H:%M:%S")
+                    days = (datetime.now() - dt).days
+                    if days >= settings["backup_crit_days"]:
+                        crit = True; notes.append(f"Oldest full backup {days}d")
+                    elif days >= settings["backup_warn_days"]:
+                        warn = True; notes.append(f"Oldest full backup {days}d")
+                except Exception:
+                    warn = True; notes.append("Backup date parse")
+            else:
+                warn = True; notes.append("No full backups found")
+
+            if worst_pct is not None:
+                if worst_pct >= settings["disk_crit_pct"]:
+                    crit = True; notes.append(f"Disk {worst_pct}%")
+                elif worst_pct >= settings["disk_warn_pct"]:
+                    warn = True; notes.append(f"Disk {worst_pct}%")
+
+            row["Check Status"] = "CRIT" if crit else ("WARN" if warn else "OK")
+            row["Error"] = "; ".join(notes)
+
         return row
 
-    except pyodbc.Error as e:
-        row["Error"] = str(e)
-        row["Check Status"] = "CRIT"
-        return row
     except Exception as e:
         row["Error"] = str(e)
         row["Check Status"] = "CRIT"
         return row
 
-# -------------- GUI ----------------
-COLUMNS = [
-    "S.No",
-    "SQL Server Instance",
-    "Environment",
-    "Version",
-    "CU",
-    "Instance Status",
-    "Agent Status",
-    "totaldatabases/online databases",
-    "Oldest date of Last full backup of db",
-    "Disk size with %",
-    "Last checked",
-    "Check Status",
-    "Error"
-]
-
+# ---------------- GUI ----------------
 class ServerDialog(tk.Toplevel):
     def __init__(self, master, server=None):
         super().__init__(master)
@@ -310,7 +297,6 @@ class ServerDialog(tk.Toplevel):
         self.resizable(False, False)
         self.result = None
 
-        # defaults
         data = server or {"instance":"", "environment":"", "auth":"windows", "username":"", "save_pwd": False}
         row = 0
 
@@ -337,13 +323,7 @@ class ServerDialog(tk.Toplevel):
         self.e_user.insert(0, data.get("username",""))
         self.e_user.grid(row=0, column=1, sticky="w", padx=6, pady=2)
 
-        ttk.Label(self.frm_sql, text="SQL Password:").grid(row=1, column=0, sticky="w")
-        self.e_pwd = ttk.Entry(self.frm_sql, width=25, show="*")
-        self.e_pwd.grid(row=1, column=1, sticky="w", padx=6, pady=2)
-
-        self.save_pwd_var = tk.BooleanVar(value=bool(data.get("save_pwd", False)))
-        self.chk_save = ttk.Checkbutton(self.frm_sql, text="Save password to Windows Credential Manager", variable=self.save_pwd_var)
-        self.chk_save.grid(row=2, column=0, columnspan=2, sticky="w", pady=(4,6))
+        ttk.Label(self.frm_sql, text="(Optional) Save password to Windows Credential Manager via keyring on first successful connect.").grid(row=1, column=0, columnspan=2, sticky="w", pady=(4,2))
 
         self.frm_sql.grid(row=row, column=0, padx=8, pady=2, sticky="we"); row+=1
 
@@ -367,31 +347,18 @@ class ServerDialog(tk.Toplevel):
         env = self.e_env.get().strip()
         auth = self.auth_var.get()
         user = self.e_user.get().strip() if auth == "sql" else ""
-        pwd = self.e_pwd.get() if auth == "sql" else ""
-        save_pwd = self.save_pwd_var.get() if auth == "sql" else False
-
         if not instance:
             messagebox.showerror("Error", "Instance is required.")
             return
         if auth == "sql" and not user:
             messagebox.showerror("Error", "SQL username is required.")
             return
-
-        # Optionally save password
-        if auth == "sql" and save_pwd and pwd:
-            if keyring is None:
-                messagebox.showwarning("Keyring unavailable", "keyring package is not installed; password cannot be saved. It will still be used for this session.")
-            else:
-                ok = set_sql_password_in_keyring(instance, user, pwd)
-                if not ok:
-                    messagebox.showwarning("Keyring", "Failed to save password in keyring.")
-
         self.result = {
             "instance": instance,
             "environment": env,
             "auth": auth,
             "username": user if auth == "sql" else "",
-            "save_pwd": bool(save_pwd) if auth == "sql" else False
+            "save_pwd": bool(False)  # we store on first successful connect
         }
         self.destroy()
 
@@ -416,10 +383,13 @@ class SettingsDialog(tk.Toplevel):
         self.v_warn_pct  = add_row("Disk WARN %:", "disk_warn_pct")
         self.v_crit_pct  = add_row("Disk CRIT %:", "disk_crit_pct")
         self.v_workers   = add_row("Max parallel workers:", "max_workers")
-        self.v_driver    = add_row("ODBC Driver:", "odbc_driver", width=24)
+        self.v_port      = add_row("TCP Port:", "port")
+        self.v_tds       = add_row("TDS version (7.3/7.4):", "tds_version", width=8)
 
-        self.var_trust = tk.BooleanVar(value=bool(self.settings.get("trust_server_cert", True)))
-        ttk.Checkbutton(self, text="Trust Server Certificate", variable=self.var_trust).pack(anchor="w", padx=10, pady=(4,8))
+        self.var_encrypt = tk.BooleanVar(value=bool(self.settings.get("encrypt", True)))
+        self.var_trust   = tk.BooleanVar(value=bool(self.settings.get("trust_server_cert", True)))
+        ttk.Checkbutton(self, text="Encrypt connection", variable=self.var_encrypt).pack(anchor="w", padx=10)
+        ttk.Checkbutton(self, text="Trust Server Certificate (skip hostname validation)", variable=self.var_trust).pack(anchor="w", padx=10, pady=(0,8))
 
         btns = ttk.Frame(self)
         ttk.Button(btns, text="Save", command=self._save).grid(row=0, column=0, padx=6)
@@ -436,7 +406,9 @@ class SettingsDialog(tk.Toplevel):
             s["disk_warn_pct"]    = int(self.v_warn_pct.get())
             s["disk_crit_pct"]    = int(self.v_crit_pct.get())
             s["max_workers"]      = int(self.v_workers.get())
-            s["odbc_driver"]      = self.v_driver.get().strip()
+            s["port"]             = int(self.v_port.get())
+            s["tds_version"]      = self.v_tds.get().strip()
+            s["encrypt"]          = bool(self.var_encrypt.get())
             s["trust_server_cert"]= bool(self.var_trust.get())
             save_settings(s)
             self.destroy()
@@ -449,9 +421,8 @@ class App(tk.Tk):
         self.title(APP_NAME)
         self.geometry("1300x700")
         self.settings = load_settings()
-        self.servers = load_servers()  # dict with "servers":[...]
+        self.servers = load_servers()
         self.data_rows = []
-        self._lock = threading.Lock()
 
         # Toolbar
         bar = ttk.Frame(self)
@@ -470,14 +441,11 @@ class App(tk.Tk):
             self.tree.column(col, width=160 if col not in ("S.No","CU") else 70, anchor="w")
         self.tree.pack(fill="both", expand=True)
 
-        # Row tags for colors
         style = ttk.Style(self)
-        style.map("Treeview")  # allow default
         self.tree.tag_configure("CRIT", background="#FDE7E9")
         self.tree.tag_configure("WARN", background="#FFF8E1")
         self.tree.tag_configure("OK",   background="#E8F5E9")
 
-        # Initial refresh
         self.after(200, self.refresh)
 
     def set_status(self, txt):
@@ -497,16 +465,14 @@ class App(tk.Tk):
             rows = []
             with ThreadPoolExecutor(max_workers=self.settings["max_workers"]) as ex:
                 futures = {ex.submit(test_instance, self.settings, s): s for s in srvs}
-                i = 0
+                done = 0
                 for fut in as_completed(futures):
-                    row = fut.result()
-                    rows.append(row)
-                    i += 1
-                    self.set_status(f"Checked {i}/{len(srvs)}")
-            # Sort and add S.No
+                    rows.append(fut.result())
+                    done += 1
+                    self.set_status(f"Checked {done}/{len(srvs)}")
             rows.sort(key=lambda r: (r.get("Environment",""), r.get("SQL Server Instance","")))
-            for idx, r in enumerate(rows, start=1):
-                r["S.No"] = idx
+            for i, r in enumerate(rows, start=1):
+                r["S.No"] = i
             self.data_rows = rows
             self.after(0, self._bind_rows)
 
@@ -547,7 +513,7 @@ class App(tk.Tk):
         dlg.title("Manage Servers")
         dlg.geometry("650x350")
 
-        cols = ("instance","environment","auth","username","save_pwd")
+        cols = ("instance","environment","auth","username")
         tv = ttk.Treeview(dlg, columns=cols, show="headings", selectmode="browse")
         for c in cols:
             tv.heading(c, text=c)
@@ -560,14 +526,12 @@ class App(tk.Tk):
                 tv.insert("", "end", values=(s.get("instance",""),
                                              s.get("environment",""),
                                              s.get("auth",""),
-                                             s.get("username",""),
-                                             "Yes" if s.get("save_pwd") else "No"))
+                                             s.get("username","")))
 
         def add_server():
             sd = ServerDialog(self)
             self.wait_window(sd)
             if sd.result:
-                # if sql and save_pwd unchecked but password typed, we still used it for now
                 self.servers.setdefault("servers", []).append(sd.result)
                 save_servers(self.servers)
                 reload_list()
@@ -608,7 +572,6 @@ class App(tk.Tk):
     def open_settings(self):
         sd = SettingsDialog(self, self.settings)
         self.wait_window(sd)
-        # reload settings in case updated
         self.settings = load_settings()
 
 if __name__ == "__main__":
