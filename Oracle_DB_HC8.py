@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Oracle DB Health GUI Monitor — Version 6 (with auto-run methods)
+Oracle DB Health GUI Monitor — Version 6 (finalized)
+- Fix: dba_tablespaces SUM alias renamed from `online` to `tonline` to avoid keyword clash.
+- Includes auto-run methods (_toggle_auto/_start_auto/_stop_auto).
 """
-# (Same code as last message but with _toggle_auto/_start_auto/_stop_auto included)
-
 import json
 import os
 import smtplib
@@ -17,14 +17,16 @@ from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 
+# GUI
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from tkinter import font as tkfont
 
+# Oracle
 try:
     import oracledb
 except Exception:
-    oracledb = None
+    oracledb = None  # will raise on connect when used
 
 APP_NAME = "Oracle DB Health GUI Monitor"
 CONFIG_DIR = Path.home() / ".ora_gui_monitor"
@@ -32,11 +34,12 @@ CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 CONFIG_PATH = CONFIG_DIR / "config.json"
 
 ORACLE_CLIENT_LIB_DIR = os.environ.get("ORACLE_CLIENT_LIB_DIR", "")
-DEFAULT_INTERVAL_SEC = 300
+DEFAULT_INTERVAL_SEC = 300  # 5 minutes
 
 GOOD = "✅"
 BAD = "❌"
 
+# -------- Data Models --------
 @dataclass
 class DbTarget:
     name: str
@@ -44,8 +47,8 @@ class DbTarget:
     user: Optional[str] = None
     password: Optional[str] = None
     wallet_dir: Optional[str] = None
-    mode: str = "thin"
-    environment: str = "NON-PROD"
+    mode: str = "thin"  # "thick" or "thin"
+    environment: str = "NON-PROD"  # "NON-PROD" or "PROD"
 
 @dataclass
 class DbHealth:
@@ -67,12 +70,19 @@ class DbHealth:
     error: str = ""
     ts: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
+# -------- Config Helpers --------
 def default_config() -> Dict[str, Any]:
     return {
         "interval_sec": DEFAULT_INTERVAL_SEC,
         "targets": [],
         "client_lib_dir": ORACLE_CLIENT_LIB_DIR or "",
-        "email": {"server": "", "port": 25, "from_addr": "", "to_addrs": "", "subject": "Oracle DB Health Report"},
+        "email": {
+            "server": "",
+            "port": 25,
+            "from_addr": "",
+            "to_addrs": "",
+            "subject": "Oracle DB Health Report",
+        },
         "last_health": {},
         "auto_run": False,
         "column_order": [
@@ -89,6 +99,7 @@ def load_config() -> Dict[str, Any]:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
             base = default_config()
+            # Deep-merge for email
             for k, v in cfg.items():
                 if k == "email":
                     base["email"].update(v or {})
@@ -107,6 +118,7 @@ def save_config(cfg: Dict[str, Any]):
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2, default=str)
 
+# -------- Oracle --------
 def init_oracle_client_if_needed(cfg: Dict[str, Any]):
     if oracledb is None:
         return
@@ -115,7 +127,7 @@ def init_oracle_client_if_needed(cfg: Dict[str, Any]):
         try:
             oracledb.init_oracle_client(lib_dir=lib_dir)
         except Exception:
-            pass
+            pass  # fall back to thin if available
 
 def _connect(target: DbTarget):
     if oracledb is None:
@@ -142,7 +154,8 @@ SQLS = {
         "LEFT JOIN (SELECT tablespace_name, SUM(bytes)/1024/1024 free_mb FROM dba_free_space GROUP BY tablespace_name) fs "
         "ON ts.tablespace_name=fs.tablespace_name"
     ),
-    "ts_online": "SELECT COUNT(*) total, SUM(CASE WHEN UPPER(status)='ONLINE' THEN 1 ELSE 0 END) online FROM dba_tablespaces",
+    # Fix alias: `tonline` instead of `online`
+    "ts_online": "SELECT COUNT(*) total, SUM(CASE WHEN UPPER(status)='ONLINE' THEN 1 ELSE 0 END) tonline FROM dba_tablespaces",
     "db_size": "SELECT ROUND(SUM(bytes)/1024/1024/1024,1) FROM dba_data_files",
     "bk_data": (
         "SELECT MAX(bp.completion_time) "
@@ -179,6 +192,7 @@ def check_one(target: DbTarget, timeout_sec: int = 25) -> DbHealth:
             cur.execute(SQLS["inst"])
             _inst_name, inst_status, host_name, inst_version, startup_time = cur.fetchone()
 
+            # Sessions
             sessions_curr = 0
             sessions_limit = 0
             try:
@@ -192,6 +206,7 @@ def check_one(target: DbTarget, timeout_sec: int = 25) -> DbHealth:
             except Exception:
                 pass
 
+            # Worst TS%
             worst_pct = None
             try:
                 cur.execute(SQLS["tspace"])
@@ -202,16 +217,18 @@ def check_one(target: DbTarget, timeout_sec: int = 25) -> DbHealth:
             except Exception:
                 worst_pct = None
 
+            # TS Online / Total
             ts_total = None
             ts_online = None
             try:
                 cur.execute(SQLS["ts_online"])
-                total, online = cur.fetchone()
+                total, tonline = cur.fetchone()
                 ts_total = int(total or 0)
-                ts_online = int(online or 0)
+                ts_online = int(tonline or 0)
             except Exception:
                 pass
 
+            # DB size
             db_size_gb = None
             try:
                 cur.execute(SQLS["db_size"])
@@ -220,6 +237,7 @@ def check_one(target: DbTarget, timeout_sec: int = 25) -> DbHealth:
             except Exception:
                 pass
 
+            # Backups
             last_df = None
             last_arch = None
             try:
@@ -256,9 +274,16 @@ def check_one(target: DbTarget, timeout_sec: int = 25) -> DbHealth:
             )
     except Exception as e:
         elapsed_ms = int((time.time() - t0) * 1000)
-        return DbHealth(status="DOWN", details=str(e), elapsed_ms=elapsed_ms, error=str(e))
+        return DbHealth(
+            status="DOWN",
+            details=str(e),
+            elapsed_ms=elapsed_ms,
+            error=str(e),
+        )
 
+# -------- GUI --------
 class MonitorApp(ttk.Frame):
+    # Default logical columns (we will apply display order from config)
     LOGICAL_COLUMNS = (
         "S.No","DB Name","Environment","Host","DB Version","Startup Time",
         "Status","Inst_status","Sessions","WorstTS%","TS Online","DB Size",
@@ -281,12 +306,15 @@ class MonitorApp(ttk.Frame):
         self._refresh_table_from_targets()
         self._load_last_health_into_rows()
 
+        # auto-run
         if cfg.get("auto_run"):
             self.auto_var.set(True)
             self._start_auto()
         self.master.protocol("WM_DELETE_WINDOW", self._on_close)
 
+    # ----- UI Build -----
     def _build_ui(self):
+        # Toolbar 1
         t1 = ttk.Frame(self)
         t1.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(6,3))
 
@@ -314,6 +342,7 @@ class MonitorApp(ttk.Frame):
         ttk.Entry(t1, textvariable=self.client_dir_var, width=22).pack(side=tk.LEFT, padx=4)
         ttk.Button(t1, text="Browse", command=self._pick_client_dir).pack(side=tk.LEFT)
 
+        # Toolbar 2 (Mail)
         t2 = ttk.Frame(self)
         t2.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(0,6))
 
@@ -335,9 +364,11 @@ class MonitorApp(ttk.Frame):
         ttk.Button(t2, text="Save Mail", command=self._save_mail_settings).pack(side=tk.LEFT, padx=(6,0))
         ttk.Button(t2, text="Email Report", command=self._email_report).pack(side=tk.LEFT, padx=(6,0))
 
+        # Tree + scrollbars
         tree_frame = ttk.Frame(self)
         tree_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
+        # Use logical columns for construction; display order may differ
         self.tree = ttk.Treeview(tree_frame, columns=self.LOGICAL_COLUMNS, show="headings", height=20)
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
         xsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
@@ -346,25 +377,31 @@ class MonitorApp(ttk.Frame):
         self.tree.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         xsb.pack(side=tk.BOTTOM, fill=tk.X)
 
+        # Headings & initial widths
         for col in self.LOGICAL_COLUMNS:
             self.tree.heading(col, text=col, command=lambda c=col: self._sort_by_column(c, False))
             self.tree.column(col, width=120, stretch=True, anchor="w")
 
+        # Apply persisted display order (excluding S.No which stays first)
         order = self.cfg.get("column_order", list(self.LOGICAL_COLUMNS))
+        # Ensure includes all columns
         order = [c for c in order if c in self.LOGICAL_COLUMNS]
         for c in self.LOGICAL_COLUMNS:
             if c not in order:
                 order.append(c)
+        # S.No must be first
         if order[0] != "S.No":
             order = ["S.No"] + [c for c in order if c != "S.No"]
         self.tree["displaycolumns"] = order
 
+        # Apply persisted widths
         for col, w in self.cfg.get("column_widths", {}).items():
             try:
                 self.tree.column(col, width=int(w))
             except Exception:
                 pass
 
+        # Right-click copy menu
         self.menu = tk.Menu(self, tearoff=0)
         self.menu.add_command(label="Copy Cell", command=self._copy_cell)
         self.menu.add_separator()
@@ -373,13 +410,16 @@ class MonitorApp(ttk.Frame):
         self.menu.add_command(label="Copy Error", command=lambda: self._copy_by_col("Error"))
         self.tree.bind("<Button-3>", self._show_context_menu)
 
+        # Save widths/order when user releases mouse (resize or after customizing)
         self.tree.bind("<ButtonRelease-1>", lambda e: self._persist_column_layout())
 
+        # Status bar
         bottombar = ttk.Frame(self)
         bottombar.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=4)
         self.status_var = tk.StringVar(value="Idle")
         ttk.Label(bottombar, textvariable=self.status_var).pack(side=tk.LEFT)
 
+        # Font for measuring text
         self._font = tkfont.nametofont("TkDefaultFont")
 
     # ----- Auto-run -----
@@ -396,23 +436,28 @@ class MonitorApp(ttk.Frame):
             return
         self._auto_flag = True
         self.status_var.set(f"Auto-running every {self.interval_var.get()}s...")
+        # Kick the loop shortly after enabling
         self.after(200, self._loop)
 
     def _stop_auto(self):
         self._auto_flag = False
         self.status_var.set("Auto-run stopped")
 
-    # Column utilities
+    # ----- Column utilities -----
     def _persist_column_layout(self):
+        # Persist widths
         widths = {col: self.tree.column(col, option="width") for col in self.LOGICAL_COLUMNS}
         self.cfg["column_widths"] = widths
+        # Persist display order
         order = list(self.tree["displaycolumns"])
         self.cfg["column_order"] = order
         save_config(self.cfg)
 
     def _autosize_columns(self):
-        pad = 24
+        # Auto-fit to max of header and visible cell text (approx)
+        pad = 24  # padding in pixels
         for col in self.LOGICAL_COLUMNS:
+            # Collect header and all visible values
             header_w = self._font.measure(col)
             max_w = header_w
             for iid in self.tree.get_children(""):
@@ -426,11 +471,13 @@ class MonitorApp(ttk.Frame):
                 except Exception:
                     pass
             new_w = max(max_w + pad, 90)
+            # If user already set a width larger, keep it
             current = self.tree.column(col, option="width")
             if current < new_w:
                 self.tree.column(col, width=new_w)
 
     def _customize_columns(self):
+        # dialog to reorder columns (except S.No)
         dlg = tk.Toplevel(self)
         dlg.title("Customize Columns")
         dlg.geometry("380x420")
@@ -446,12 +493,15 @@ class MonitorApp(ttk.Frame):
         def move(offset: int):
             sel = lb.curselection()
             if not sel: return
-            i = sel[0]; j = i + offset
+            i = sel[0]
+            j = i + offset
             if j < 0 or j >= lb.size(): return
             items = list(lb.get(0, tk.END))
             items[i], items[j] = items[j], items[i]
             var_list.set(items)
-            lb.selection_clear(0, tk.END); lb.selection_set(j); lb.activate(j)
+            lb.selection_clear(0, tk.END)
+            lb.selection_set(j)
+            lb.activate(j)
 
         ttk.Button(btns, text="Up", command=lambda: move(-1)).pack(side=tk.LEFT, padx=4)
         ttk.Button(btns, text="Down", command=lambda: move(1)).pack(side=tk.LEFT, padx=4)
@@ -467,7 +517,7 @@ class MonitorApp(ttk.Frame):
         ttk.Button(btns, text="Apply", command=apply_and_close).pack(side=tk.RIGHT, padx=4)
         ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side=tk.RIGHT, padx=4)
 
-    # Context menu
+    # ----- Context Menu -----
     def _show_context_menu(self, event):
         iid = self.tree.identify_row(event.y)
         cid = self.tree.identify_column(event.x)
@@ -499,12 +549,14 @@ class MonitorApp(ttk.Frame):
         self.clipboard_clear()
         self.clipboard_append(text)
 
-    # Sorting helpers
+    # ----- Sorting helpers -----
     def _parse_sessions(self, s: str) -> Tuple[int,int]:
         t = str(s).strip()
-        if " " in t: t = t.split()[-1]
+        if " " in t:
+            t = t.split()[-1]
         try:
-            a, b = t.split("/"); return (int(a), int(b))
+            a, b = t.split("/")
+            return (int(a), int(b))
         except Exception:
             return (0, 0)
 
@@ -516,11 +568,14 @@ class MonitorApp(ttk.Frame):
 
     def _parse_datecell(self, s: str) -> float:
         parts = str(s).strip().split()
-        if not parts or parts[-1] == "-": return float("-inf")
+        if not parts or parts[-1] == "-":
+            return float("-inf")
         try:
             if len(parts) >= 2 and ":" in parts[-1]:
-                dt = datetime.strptime(f"{parts[-2]} {parts[-1]}", "%Y-%m-%d %H:%M:%S"); return dt.timestamp()
-            dt = datetime.strptime(parts[-1], "%Y-%m-%d"); return dt.timestamp()
+                dt = datetime.strptime(f"{parts[-2]} {parts[-1]}", "%Y-%m-%d %H:%M:%S")
+                return dt.timestamp()
+            dt = datetime.strptime(parts[-1], "%Y-%m-%d")
+            return dt.timestamp()
         except Exception:
             return float("-inf")
 
@@ -532,9 +587,11 @@ class MonitorApp(ttk.Frame):
 
     def _ts_online_rank(self, s: str) -> Tuple[int,int]:
         t = str(s).strip()
-        if " " in t: t = t.split()[-1]
+        if " " in t:
+            t = t.split()[-1]
         try:
-            a, b = t.split("/"); return (int(a), int(b))
+            a, b = t.split("/")
+            return (int(a), int(b))
         except Exception:
             return (0, 0)
 
@@ -554,7 +611,8 @@ class MonitorApp(ttk.Frame):
             curr, limit = self._parse_sessions(s)
             return (curr/limit if limit else -1.0, curr, limit)
         if col == "TS Online":
-            on, tot = self._ts_online_rank(s); return (on, tot)
+            on, tot = self._ts_online_rank(s)
+            return (on, tot)
         if col == "DB Size":
             try: return (float(str(s).split()[0]),)
             except: return (-1.0,)
@@ -562,7 +620,8 @@ class MonitorApp(ttk.Frame):
             try: return (int(s),)
             except: return (-1,)
         if col == "Check status":
-            order = {"In Progress": 0, "Complete": 1}; return (order.get(s, 2), s)
+            order = {"In Progress": 0, "Complete": 1}
+            return (order.get(s, 2), s)
         return (str(s).lower(),)
 
     def _sort_by_column(self, col: str, descending: bool):
@@ -573,36 +632,45 @@ class MonitorApp(ttk.Frame):
         self._renumber()
         self.tree.heading(col, command=lambda c=col: self._sort_by_column(c, not descending))
 
-    # Helpers & loop
+    # ----- Helpers -----
     def _renumber(self):
         for i, iid in enumerate(self.tree.get_children(""), start=1):
             vals = list(self.tree.item(iid)["values"])
             if vals:
-                vals[0] = i; self.tree.item(iid, values=vals)
+                vals[0] = i
+                self.tree.item(iid, values=vals)
 
     def _pick_client_dir(self):
         d = filedialog.askdirectory(title="Select Oracle Client lib directory")
         if d:
-            self.client_dir_var.set(d); self.cfg["client_lib_dir"] = d; save_config(self.cfg)
+            self.client_dir_var.set(d)
+            self.cfg["client_lib_dir"] = d
+            save_config(self.cfg)
 
     def _refresh_table_from_targets(self):
-        for i in self.tree.get_children(): self.tree.delete(i)
+        for i in self.tree.get_children():
+            self.tree.delete(i)
         for idx, t in enumerate(self.targets, start=1):
             values = ["-"] * len(self.LOGICAL_COLUMNS)
-            values[0] = idx; values[1] = t.name; values[2] = t.environment
+            values[0] = idx
+            values[1] = t.name
+            values[2] = t.environment
             self.tree.insert("", tk.END, iid=t.name, values=tuple(values))
-        self._renumber(); self._autosize_columns()
+        self._renumber()
+        self._autosize_columns()
 
     def _load_last_health_into_rows(self):
         for t in self.targets:
             hdict = self.last_health.get(t.name)
-            if not hdict: continue
+            if not hdict:
+                continue
             self._apply_persisted_row(t.name, hdict)
         self._autosize_columns()
 
     def _apply_persisted_row(self, name: str, hdict: Dict[str, Any]):
         vals = list(self.tree.item(name)["values"])
-        def mark(ok: bool) -> str: return GOOD if ok else BAD
+        def mark(ok: bool) -> str:
+            return GOOD if ok else BAD
         status_cell = f"{mark(hdict.get('status','').upper() == 'UP')} {hdict.get('status','-')}"
         inst_cell = f"{mark((hdict.get('inst_status','') or '').upper() == 'OPEN')} {hdict.get('inst_status','-')}"
         sc = int(hdict.get('sessions_curr',0)); sl = int(hdict.get('sessions_limit',0) or 0)
@@ -618,6 +686,7 @@ class MonitorApp(ttk.Frame):
         ts_cell = f"{mark(ts_ok)} {on}/{tot}" if tot else f"{BAD} 0/0"
         db_size_cell = f"{hdict.get('db_size_gb','-')} GB" if hdict.get('db_size_gb') is not None else "-"
 
+        # Map to columns
         colidx = {c:i for i,c in enumerate(self.LOGICAL_COLUMNS)}
         vals[colidx["Host"]] = hdict.get("host","-")
         vals[colidx["Status"]] = status_cell
@@ -636,62 +705,80 @@ class MonitorApp(ttk.Frame):
         vals[colidx["Error"]] = hdict.get("error","")
         self.tree.item(name, values=vals)
 
-    # Run
+    # ----- Monitoring -----
     def run_all_once(self):
         self._checks_async(targets=self.targets)
 
     def run_selected_once(self):
         sel = self.tree.selection()
         if not sel:
-            messagebox.showinfo(APP_NAME, "Select a row (DB) to run."); return
+            messagebox.showinfo(APP_NAME, "Select a row (DB) to run.")
+            return
         name = sel[0]
         target = next((x for x in self.targets if x.name == name), None)
         if not target:
-            messagebox.showerror(APP_NAME, "Selected DB not found."); return
+            messagebox.showerror(APP_NAME, "Selected DB not found.")
+            return
         self._checks_async(targets=[target])
 
     def _loop(self):
-        if not self.auto_var.get(): return
+        if not self.auto_var.get():
+            return
         self._checks_async(targets=self.targets)
         self.after(self.interval_var.get() * 1000, self._loop)
 
     def _checks_async(self, targets: List[DbTarget]):
-        for t in targets: self._set_check_status(t.name, "In Progress")
+        for t in targets:
+            self._set_check_status(t.name, "In Progress")
+
         def job(t: DbTarget):
-            try: res = check_one(t)
-            except Exception as e: res = DbHealth(status="DOWN", details=str(e), error=str(e))
+            try:
+                res = check_one(t)
+            except Exception as e:
+                res = DbHealth(status="DOWN", details=str(e), error=str(e))
             self.after(0, lambda tn=t.name, tr=t, rh=res: self._apply_result(tn, tr, rh))
-        for t in targets: threading.Thread(target=job, args=(t,), daemon=True).start()
+
+        for t in targets:
+            threading.Thread(target=job, args=(t,), daemon=True).start()
 
     def _set_check_status(self, name: str, status: str):
         if name in self.tree.get_children():
             vals = list(self.tree.item(name)["values"])
             idx = self.LOGICAL_COLUMNS.index("Check status")
-            if len(vals) <= idx: vals += [""] * (idx + 1 - len(vals))
-            vals[idx] = status; self.tree.item(name, values=vals)
+            if len(vals) <= idx:
+                vals += [""] * (idx + 1 - len(vals))
+            vals[idx] = status
+            self.tree.item(name, values=vals)
 
     def _apply_result(self, name: str, target: DbTarget, h: DbHealth):
         status_cell = f"{GOOD if h.status.upper() == 'UP' else BAD} {h.status}"
         inst_cell = f"{GOOD if (h.inst_status or '').upper() == 'OPEN' else BAD} {h.inst_status or '-'}"
+
+        # Sessions
         if h.sessions_limit and h.sessions_limit > 0:
             sess_ok = h.sessions_curr < 0.95 * h.sessions_limit
             sessions_cell = f"{GOOD if sess_ok else BAD} {h.sessions_curr}/{h.sessions_limit}"
         else:
             sessions_cell = f"{BAD} 0/0"
+
+        # Worst TS%
         worst_ok = not (h.worst_ts_pct_used is not None and h.worst_ts_pct_used >= 90.0)
         worst_val = '-' if h.worst_ts_pct_used is None else f"{h.worst_ts_pct_used:.1f}%"
         worst_cell = f"{GOOD if worst_ok else BAD} {worst_val}"
 
         def fmt_backup(dt: Optional[datetime], arch=False):
-            if not dt: return f"{BAD} -"
+            if not dt:
+                return f"{BAD} -"
             age_hours = (datetime.now(dt.tzinfo) - dt).total_seconds()/3600.0
             ok = (age_hours <= 12) if arch else ((age_hours/24.0) <= 3)
             return f"{GOOD if ok else BAD} {_dt_str(dt)}"
 
         last_full_cell = fmt_backup(h.last_full_inc_backup, arch=False)
         last_arch_cell = fmt_backup(h.last_arch_backup, arch=True)
+
         startup_str = _dt_str(h.startup_time)
 
+        # TS Online
         if (h.ts_total or 0) > 0:
             ts_ok = (h.ts_online == h.ts_total)
             ts_cell = f"{GOOD if ts_ok else BAD} {h.ts_online}/{h.ts_total}"
@@ -702,6 +789,7 @@ class MonitorApp(ttk.Frame):
 
         vals = list(self.tree.item(name)["values"] or ["-"]*len(self.LOGICAL_COLUMNS))
         colidx = {c:i for i,c in enumerate(self.LOGICAL_COLUMNS)}
+
         vals[colidx["Host"]] = h.host or "-"
         vals[colidx["Status"]] = status_cell
         vals[colidx["Inst_status"]] = inst_cell
@@ -719,54 +807,83 @@ class MonitorApp(ttk.Frame):
         vals[colidx["Error"]] = h.error or ("" if h.status == "UP" else h.details)
         self.tree.item(name, values=vals)
 
+        # Persist snapshot
         self.last_health[name] = {
-            "status": h.status, "inst_status": h.inst_status,
-            "sessions_curr": h.sessions_curr, "sessions_limit": h.sessions_limit,
-            "worst_ts_pct_used": h.worst_ts_pct_used, "host": h.host,
-            "elapsed_ms": h.elapsed_ms, "version": h.version,
-            "startup_time_str": startup_str, "ts_online": h.ts_online, "ts_total": h.ts_total,
-            "db_size_gb": h.db_size_gb, "ts": h.ts, "error": vals[colidx["Error"]],
-            "last_full_inc_backup_str": last_full_cell, "last_arch_backup_str": last_arch_cell,
+            "status": h.status,
+            "inst_status": h.inst_status,
+            "sessions_curr": h.sessions_curr,
+            "sessions_limit": h.sessions_limit,
+            "worst_ts_pct_used": h.worst_ts_pct_used,
+            "host": h.host,
+            "elapsed_ms": h.elapsed_ms,
+            "version": h.version,
+            "startup_time_str": startup_str,
+            "ts_online": h.ts_online,
+            "ts_total": h.ts_total,
+            "db_size_gb": h.db_size_gb,
+            "ts": h.ts,
+            "error": vals[colidx["Error"]],
+            "last_full_inc_backup_str": last_full_cell,
+            "last_arch_backup_str": last_arch_cell,
         }
-        self.cfg["last_health"] = self.last_health; save_config(self.cfg)
-        self.status_var.set(f"Updated {name} at {h.ts}")
-        self._renumber(); self._autosize_columns()
+        self.cfg["last_health"] = self.last_health
+        save_config(self.cfg)
 
-    # CRUD
+        self.status_var.set(f"Updated {name} at {h.ts}")
+        self._renumber()
+        self._autosize_columns()
+
+    # ----- CRUD -----
     def _add_dialog(self):
         DbEditor(self, on_save=self._add_target)
 
     def _edit_selected(self):
         sel = self.tree.selection()
-        if not sel: messagebox.showinfo(APP_NAME, "Select a row to edit."); return
+        if not sel:
+            messagebox.showinfo(APP_NAME, "Select a row to edit.")
+            return
         name = sel[0]
         t = next((x for x in self.targets if x.name == name), None)
-        if not t: messagebox.showerror(APP_NAME, "Target not found."); return
+        if not t:
+            messagebox.showerror(APP_NAME, "Target not found.")
+            return
         DbEditor(self, target=t, on_save=self._update_target)
 
     def _remove_selected(self):
         sel = self.tree.selection()
-        if not sel: return
+        if not sel:
+            return
         name = sel[0]
         self.targets = [t for t in self.targets if t.name != name]
-        self.tree.delete(name); self._persist_targets(); self._renumber()
+        self.tree.delete(name)
+        self._persist_targets()
+        self._renumber()
 
     def _add_target(self, t: DbTarget):
         if any(x.name == t.name for x in self.targets):
-            messagebox.showerror(APP_NAME, "A target with this name already exists."); return
-        self.targets.append(t); self._persist_targets()
+            messagebox.showerror(APP_NAME, "A target with this name already exists.")
+            return
+        self.targets.append(t)
+        self._persist_targets()
         values = ["-"] * len(self.LOGICAL_COLUMNS)
-        values[0] = len(self.targets); values[1] = t.name; values[2] = t.environment
+        values[0] = len(self.targets)
+        values[1] = t.name
+        values[2] = t.environment
         self.tree.insert("", tk.END, iid=t.name, values=tuple(values))
-        self._renumber(); self._autosize_columns()
+        self._renumber()
+        self._autosize_columns()
 
     def _update_target(self, t: DbTarget):
         for i, x in enumerate(self.targets):
-            if x.name == t.name: self.targets[i] = t; break
+            if x.name == t.name:
+                self.targets[i] = t
+                break
         self._persist_targets()
         vals = list(self.tree.item(t.name)["values"])
-        vals[1] = t.name; vals[2] = t.environment
-        self.tree.item(t.name, values=vals); self._autosize_columns()
+        vals[1] = t.name
+        vals[2] = t.environment
+        self.tree.item(t.name, values=vals)
+        self._autosize_columns()
 
     def _persist_targets(self):
         self.cfg["interval_sec"] = self.interval_var.get()
@@ -775,18 +892,23 @@ class MonitorApp(ttk.Frame):
         self.cfg["auto_run"] = self.auto_var.get()
         save_config(self.cfg)
 
+    # ----- Import/Export & Email -----
     def _import_json(self):
         p = filedialog.askopenfilename(title="Import config.json", filetypes=[["JSON", "*.json"]])
-        if not p: return
+        if not p:
+            return
         try:
-            with open(p, "r", encoding="utf-8") as f: cfg = json.load(f)
+            with open(p, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
             self.cfg.update(cfg)
-            if "email" in cfg: self.cfg["email"].update(cfg["email"] or {})
+            if "email" in cfg:
+                self.cfg["email"].update(cfg["email"] or {})
             self.interval_var.set(int(self.cfg.get("interval_sec", DEFAULT_INTERVAL_SEC)))
             self.client_dir_var.set(self.cfg.get("client_lib_dir", ""))
             self.auto_var.set(bool(self.cfg.get("auto_run", False)))
             self.targets = [DbTarget(**t) for t in self.cfg.get("targets", [])]
             self.last_health = self.cfg.get("last_health", {})
+            # Column order/widths
             if "column_order" in self.cfg:
                 order = [c for c in self.cfg["column_order"] if c in self.LOGICAL_COLUMNS]
                 order = ["S.No"] + [c for c in order if c != "S.No"]
@@ -796,14 +918,16 @@ class MonitorApp(ttk.Frame):
                     try: self.tree.column(col, width=int(w))
                     except: pass
             save_config(self.cfg)
-            self._refresh_table_from_targets(); self._load_last_health_into_rows()
+            self._refresh_table_from_targets()
+            self._load_last_health_into_rows()
             messagebox.showinfo(APP_NAME, "Imported configuration.")
         except Exception as e:
             messagebox.showerror(APP_NAME, f"Failed to import: {e}")
 
     def _export_json(self):
         p = filedialog.asksaveasfilename(title="Export config.json", defaultextension=".json", initialfile="config.json")
-        if not p: return
+        if not p:
+            return
         try:
             export = {
                 "interval_sec": self.interval_var.get(),
@@ -821,16 +945,20 @@ class MonitorApp(ttk.Frame):
                 "column_order": list(self.tree["displaycolumns"]),
                 "column_widths": {c: self.tree.column(c,"width") for c in self.LOGICAL_COLUMNS},
             }
-            with open(p, "w", encoding="utf-8") as f: json.dump(export, f, indent=2)
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(export, f, indent=2)
             messagebox.showinfo(APP_NAME, "Exported configuration.")
         except Exception as e:
             messagebox.showerror(APP_NAME, f"Failed to export: {e}")
 
+    # ----- Email -----
     def _save_mail_settings(self):
         self.cfg.setdefault("email", {})
         self.cfg["email"]["server"] = self.smtp_server_var.get().strip()
-        try: self.cfg["email"]["port"] = int(self.smtp_port_var.get() or 25)
-        except Exception: self.cfg["email"]["port"] = 25
+        try:
+            self.cfg["email"]["port"] = int(self.smtp_port_var.get() or 25)
+        except Exception:
+            self.cfg["email"]["port"] = 25
         self.cfg["email"]["from_addr"] = self.from_var.get().strip()
         self.cfg["email"]["to_addrs"] = self.to_var.get().strip()
         save_config(self.cfg)
@@ -843,8 +971,11 @@ class MonitorApp(ttk.Frame):
         from_addr = self.from_var.get().strip() or email_cfg.get("from_addr", "")
         to_addrs = self.to_var.get().strip() or email_cfg.get("to_addrs", "")
         subject = email_cfg.get("subject", "Oracle DB Health Report")
+
         if not (server and from_addr and to_addrs):
-            messagebox.showerror(APP_NAME, "Set SMTP server, From, and To addresses first."); return
+            messagebox.showerror(APP_NAME, "Set SMTP server, From, and To addresses first.")
+            return
+
         rows = [self.tree.item(i)["values"] for i in self.tree.get_children("")]
         html = self._build_html(rows)
         try:
@@ -859,15 +990,22 @@ class MonitorApp(ttk.Frame):
             ok = None
             if col in ("Status","Inst_status","WorstTS%","LastFull/Inc","LastArch","Sessions","TS Online"):
                 t = str(text).strip()
-                if t.startswith(GOOD): ok = True
-                elif t.startswith(BAD): ok = False
+                if t.startswith(GOOD):
+                    ok = True
+                elif t.startswith(BAD):
+                    ok = False
             if col == "WorstTS%":
                 try:
-                    pct = float(str(text).split()[-1].replace("%","")); ok = pct < 90.0
-                except Exception: pass
-            if ok is True: return "background-color:#e6ffe6;color:#064b00;font-weight:bold;"
-            if ok is False: return "background-color:#ffe6e6;color:#7a0000;font-weight:bold;"
+                    pct = float(str(text).split()[-1].replace("%",""))
+                    ok = pct < 90.0
+                except Exception:
+                    pass
+            if ok is True:
+                return "background-color:#e6ffe6;color:#064b00;font-weight:bold;"
+            if ok is False:
+                return "background-color:#ffe6e6;color:#7a0000;font-weight:bold;"
             return ""
+
         thead = "<tr>" + "".join(f"<th style='padding:6px 10px;border-bottom:1px solid #ccc;text-align:left'>{h}</th>" for h in headers) + "</tr>"
         body_rows = []
         for r in rows:
@@ -881,11 +1019,16 @@ class MonitorApp(ttk.Frame):
         return "<html><body>"+title+table+"</body></html>"
 
     def _send_html_email(self, server: str, port: int, from_addr: str, to_addrs: List[str], subject: str, html: str):
-        msg = MIMEMultipart("alternative"); msg["Subject"] = subject; msg["From"] = from_addr; msg["To"] = ", ".join(to_addrs)
-        part = MIMEText(html, "html", "utf-8"); msg.attach(part)
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = from_addr
+        msg["To"] = ", ".join(to_addrs)
+        part = MIMEText(html, "html", "utf-8")
+        msg.attach(part)
         with smtplib.SMTP(server, port, timeout=20) as s:
             s.sendmail(from_addr, to_addrs, msg.as_string())
 
+    # ----- Window Close -----
     def _on_close(self):
         self._persist_targets()
         self.cfg["last_health"] = self.last_health
@@ -893,10 +1036,14 @@ class MonitorApp(ttk.Frame):
         save_config(self.cfg)
         self.master.destroy()
 
+# ----- DB Editor -----
 class DbEditor(tk.Toplevel):
     def __init__(self, parent: "MonitorApp", target: Optional[DbTarget] = None, on_save=None):
         super().__init__(parent)
-        self.title("DB Target"); self.resizable(False, False); self.on_save = on_save
+        self.title("DB Target")
+        self.resizable(False, False)
+        self.on_save = on_save
+
         self.var_name = tk.StringVar(value=target.name if target else "")
         self.var_dsn = tk.StringVar(value=target.dsn if target else "")
         self.var_user = tk.StringVar(value=target.user if target else "")
@@ -905,12 +1052,17 @@ class DbEditor(tk.Toplevel):
         self.var_mode = tk.StringVar(value=target.mode if target else "thick")
         self.var_env = tk.StringVar(value=target.environment if target else "NON-PROD")
 
-        frm = ttk.Frame(self, padding=10); frm.pack(fill=tk.BOTH, expand=True)
+        frm = ttk.Frame(self, padding=10)
+        frm.pack(fill=tk.BOTH, expand=True)
+
         def row_entry(lbl, var, show=None, browse=False):
-            r = ttk.Frame(frm); r.pack(fill=tk.X, pady=4)
+            r = ttk.Frame(frm)
+            r.pack(fill=tk.X, pady=4)
             ttk.Label(r, text=lbl, width=20).pack(side=tk.LEFT)
-            e = ttk.Entry(r, textvariable=var, show=show, width=48); e.pack(side=tk.LEFT, padx=4)
-            if browse: ttk.Button(r, text="...", width=3, command=lambda v=var: self._pick_dir(v)).pack(side=tk.LEFT)
+            e = ttk.Entry(r, textvariable=var, show=show, width=48)
+            e.pack(side=tk.LEFT, padx=4)
+            if browse:
+                ttk.Button(r, text="...", width=3, command=lambda v=var: self._pick_dir(v)).pack(side=tk.LEFT)
 
         row_entry("DB Name:", self.var_name)
         row_entry("TNS Alias / EZConnect:", self.var_dsn)
@@ -918,44 +1070,60 @@ class DbEditor(tk.Toplevel):
         row_entry("Password:", self.var_pwd, show="*")
         row_entry("Wallet Dir:", self.var_wallet, browse=True)
 
-        rmode = ttk.Frame(frm); rmode.pack(fill=tk.X, pady=4)
+        rmode = ttk.Frame(frm)
+        rmode.pack(fill=tk.X, pady=4)
         ttk.Label(rmode, text="Mode:", width=20).pack(side=tk.LEFT)
         ttk.Radiobutton(rmode, text="Thick", value="thick", variable=self.var_mode).pack(side=tk.LEFT)
         ttk.Radiobutton(rmode, text="Thin", value="thin", variable=self.var_mode).pack(side=tk.LEFT)
 
-        renv = ttk.Frame(frm); renv.pack(fill=tk.X, pady=4)
+        renv = ttk.Frame(frm)
+        renv.pack(fill=tk.X, pady=4)
         ttk.Label(renv, text="Environment:", width=20).pack(side=tk.LEFT)
         self.env_combo = ttk.Combobox(renv, textvariable=self.var_env, state="readonly", values=["NON-PROD","PROD"], width=45)
         self.env_combo.pack(side=tk.LEFT, padx=4)
 
-        btns = ttk.Frame(frm); btns.pack(fill=tk.X, pady=(10, 2))
+        btns = ttk.Frame(frm)
+        btns.pack(fill=tk.X, pady=(10, 2))
         ttk.Button(btns, text="Save", command=self._save).pack(side=tk.RIGHT)
         ttk.Button(btns, text="Cancel", command=self.destroy).pack(side=tk.RIGHT, padx=6)
 
-        self.grab_set(); self.transient(parent); self.wait_visibility(); self.focus()
+        self.grab_set()
+        self.transient(parent)
+        self.wait_visibility()
+        self.focus()
 
     def _pick_dir(self, var: tk.StringVar):
         d = filedialog.askdirectory(title="Select wallet directory")
-        if d: var.set(d)
+        if d:
+            var.set(d)
 
     def _save(self):
-        name = self.var_name.get().strip(); dsn = self.var_dsn.get().strip()
+        name = self.var_name.get().strip()
+        dsn = self.var_dsn.get().strip()
         if not name or not dsn:
-            messagebox.showerror(APP_NAME, "DB Name and TNS Alias/EZConnect are required"); return
+            messagebox.showerror(APP_NAME, "DB Name and TNS Alias/EZConnect are required")
+            return
         t = DbTarget(
-            name=name, dsn=dsn, user=self.var_user.get().strip() or None, password=self.var_pwd.get().strip() or None,
-            wallet_dir=self.var_wallet.get().strip() or None, mode=self.var_mode.get().strip() or "thick",
+            name=name,
+            dsn=dsn,
+            user=self.var_user.get().strip() or None,
+            password=self.var_pwd.get().strip() or None,
+            wallet_dir=self.var_wallet.get().strip() or None,
+            mode=self.var_mode.get().strip() or "thick",
             environment=self.var_env.get().strip() or "NON-PROD",
         )
-        if self.on_save: self.on_save(t)
+        if self.on_save:
+            self.on_save(t)
         self.destroy()
 
+# ----- Main -----
 def main():
     cfg = load_config()
     root = tk.Tk()
     try:
         if sys.platform.startswith("win"):
-            from ctypes import windll; windll.shcore.SetProcessDpiAwareness(1)  # type: ignore
+            from ctypes import windll
+            windll.shcore.SetProcessDpiAwareness(1)  # type: ignore
     except Exception:
         pass
 
