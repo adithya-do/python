@@ -95,6 +95,10 @@ def save_monitors(monitors: Dict[str, "Monitor"]):
 
 # ---- Network check logic ----
 def perform_check(monitor: "Monitor", timeout=15):
+    """
+    Perform login (if required) and GET the target URL.
+    Returns: (ok: bool, status_text: str, detail: str)
+    """
     s = requests.Session()
     start = time.time()
     try:
@@ -114,17 +118,17 @@ def perform_check(monitor: "Monitor", timeout=15):
             else:
                 r_login = s.get(monitor.login_url, params=payload, timeout=timeout, allow_redirects=True)
             if not (200 <= r_login.status_code < 400):
-                return False, f"Login failed ({r_login.status_code})", f"Login response: {r_login.status_code} {r_login.reason}\nBody snippet: {r_login.text[:400]}"
+                return False, f"Login failed ({r_login.status_code})", f"Login response: {r_login.status_code} {r_login.reason}\\nBody snippet: {r_login.text[:400]}"
 
         r = s.get(monitor.url, auth=auth, timeout=timeout)
         elapsed = time.time() - start
         if 200 <= r.status_code < 400:
             return True, f"OK ({r.status_code})", f"HTTP {r.status_code}, elapsed: {elapsed:.2f}s"
         else:
-            return False, f"Error ({r.status_code})", f"HTTP {r.status_code} {r.reason}\nBody snippet: {r.text[:800]}"
+            return False, f"Error ({r.status_code})", f"HTTP {r.status_code} {r.reason}\\nBody snippet: {r.text[:800]}"
     except Exception as ex:
         tb = traceback.format_exc()
-        return False, "Exception", f"{repr(ex)}\n{tb}"
+        return False, "Exception", f"{repr(ex)}\\n{tb}"
 
 # ---- GUI ----
 class URLMonitorApp:
@@ -394,7 +398,7 @@ class URLMonitorApp:
             time.sleep(0.2)
             self.root.destroy()
 
-# ---- Monitor editor dialog ----
+# ---- Monitor editor dialog (fixed) ----
 class MonitorEditor(simpledialog.Dialog):
     def __init__(self, parent, initial=None):
         self.initial = initial or {}
@@ -402,60 +406,127 @@ class MonitorEditor(simpledialog.Dialog):
 
     def body(self, master):
         row = 0
+        # Name
         ttk.Label(master, text="Name").grid(row=row, column=0, sticky="w")
         self.name_var = tk.StringVar(value=self.initial.get("name", ""))
-        ttk.Entry(master, textvariable=self.name_var, width=50).grid(row=row, column=1, sticky="we"); row += 1
+        self.name_ent = ttk.Entry(master, textvariable=self.name_var, width=50)
+        self.name_ent.grid(row=row, column=1, sticky="we"); row += 1
 
+        # URL to check
         ttk.Label(master, text="URL to check").grid(row=row, column=0, sticky="w")
         self.url_var = tk.StringVar(value=self.initial.get("url", ""))
-        ttk.Entry(master, textvariable=self.url_var, width=50).grid(row=row, column=1, sticky="we"); row += 1
+        self.url_ent = ttk.Entry(master, textvariable=self.url_var, width=50)
+        self.url_ent.grid(row=row, column=1, sticky="we"); row += 1
 
+        # App type
         ttk.Label(master, text="Application Type (optional)").grid(row=row, column=0, sticky="w")
         self.app_type_var = tk.StringVar(value=self.initial.get("app_type", ""))
-        ttk.Entry(master, textvariable=self.app_type_var).grid(row=row, column=1, sticky="we"); row += 1
+        self.app_type_ent = ttk.Entry(master, textvariable=self.app_type_var)
+        self.app_type_ent.grid(row=row, column=1, sticky="we"); row += 1
 
+        # Auth type
         ttk.Label(master, text="Auth Type").grid(row=row, column=0, sticky="w")
         self.auth_var = tk.StringVar(value=self.initial.get("auth_type", "none"))
-        ttk.Combobox(master, textvariable=self.auth_var, values=("none", "basic", "form"), state="readonly").grid(row=row, column=1, sticky="w"); row += 1
+        self.auth_cb = ttk.Combobox(master, textvariable=self.auth_var, values=("none", "basic", "form"), state="readonly")
+        self.auth_cb.grid(row=row, column=1, sticky="w"); row += 1
+        self.auth_cb.bind("<<ComboboxSelected>>", lambda e: self._toggle_form_auth_fields())
 
+        # Username
         ttk.Label(master, text="Username").grid(row=row, column=0, sticky="w")
         self.username_var = tk.StringVar(value=self.initial.get("username", ""))
-        ttk.Entry(master, textvariable=self.username_var).grid(row=row, column=1, sticky="we"); row += 1
+        self.username_ent = ttk.Entry(master, textvariable=self.username_var)
+        self.username_ent.grid(row=row, column=1, sticky="we"); row += 1
 
+        # Password
         ttk.Label(master, text="Password").grid(row=row, column=0, sticky="w")
         self.password_var = tk.StringVar(value=self.initial.get("password", ""))
-        ttk.Entry(master, textvariable=self.password_var, show="*").grid(row=row, column=1, sticky="we"); row += 1
+        self.password_ent = ttk.Entry(master, textvariable=self.password_var, show="*")
+        self.password_ent.grid(row=row, column=1, sticky="we"); row += 1
 
+        # Login URL (form auth)
         ttk.Label(master, text="Login URL (for form auth)").grid(row=row, column=0, sticky="w")
         self.login_url_var = tk.StringVar(value=self.initial.get("login_url", ""))
-        ttk.Entry(master, textvariable=self.login_url_var, width=50).grid(row=row, column=1, sticky="we"); row += 1
+        self.login_url_ent = ttk.Entry(master, textvariable=self.login_url_var, width=50)
+        self.login_url_ent.grid(row=row, column=1, sticky="we"); row += 1
 
+        # Form username field
         ttk.Label(master, text="Form username field").grid(row=row, column=0, sticky="w")
         self.form_user_field_var = tk.StringVar(value=self.initial.get("form_username_field", "username"))
-        ttk.Entry(master, textvariable=self.form_user_field_var).grid(row=row, column=1, sticky="we"); row += 1
+        self.form_user_field_ent = ttk.Entry(master, textvariable=self.form_user_field_var)
+        self.form_user_field_ent.grid(row=row, column=1, sticky="we"); row += 1
 
+        # Form password field
         ttk.Label(master, text="Form password field").grid(row=row, column=0, sticky="w")
         self.form_pwd_field_var = tk.StringVar(value=self.initial.get("form_password_field", "password"))
-        ttk.Entry(master, textvariable=self.form_pwd_field_var).grid(row=row, column=1, sticky="we"); row += 1
+        self.form_pwd_field_ent = ttk.Entry(master, textvariable=self.form_pwd_field_var)
+        self.form_pwd_field_ent.grid(row=row, column=1, sticky="we"); row += 1
 
+        # Login method
         ttk.Label(master, text="Login method (GET/POST)").grid(row=row, column=0, sticky="w")
         self.login_method_var = tk.StringVar(value=self.initial.get("login_method", "POST"))
-        ttk.Combobox(master, textvariable=self.login_method_var, values=("POST", "GET"), state="readonly").grid(row=row, column=1, sticky="w"); row += 1
+        self.login_method_cb = ttk.Combobox(master, textvariable=self.login_method_var, values=("POST", "GET"), state="readonly")
+        self.login_method_cb.grid(row=row, column=1, sticky="w"); row += 1
 
+        # Interval
         ttk.Label(master, text="Interval (seconds)").grid(row=row, column=0, sticky="w")
-        self.interval_var = tk.IntVar(value=int(self.initial.get("interval", DEFAULT_INTERVAL)))
-        ttk.Entry(master, textvariable=self.interval_var).grid(row=row, column=1, sticky="we"); row += 1
+        self.interval_var = tk.StringVar(value=str(self.initial.get("interval", DEFAULT_INTERVAL)))
+        self.interval_ent = ttk.Entry(master, textvariable=self.interval_var)
+        self.interval_ent.grid(row=row, column=1, sticky="we"); row += 1
 
+        # Enabled
         ttk.Label(master, text="Enabled").grid(row=row, column=0, sticky="w")
         self.enabled_var = tk.BooleanVar(value=bool(self.initial.get("enabled", True)))
-        ttk.Checkbutton(master, variable=self.enabled_var).grid(row=row, column=1, sticky="w"); row += 1
+        self.enabled_chk = ttk.Checkbutton(master, variable=self.enabled_var)
+        self.enabled_chk.grid(row=row, column=1, sticky="w"); row += 1
 
-        help_txt = ("Note: credentials are stored in plaintext in config/url_monitor.json\n"
-                    "If you need secure storage, integrate OS keyring or a secrets vault.")
+        # Help
+        help_txt = ("Note: credentials are stored in plaintext in config/url_monitor.json\\n"
+                    "For secure storage, integrate OS keyring or a secrets vault.")
         ttk.Label(master, text=help_txt, foreground="gray").grid(row=row, column=0, columnspan=2, sticky="w"); row += 1
-        return None
+
+        # Initial toggle based on selected auth
+        self._toggle_form_auth_fields()
+        return self.name_ent  # focus
+
+    def _toggle_form_auth_fields(self):
+        """Enable/disable ONLY the login-related fields based on auth type."""
+        auth = self.auth_var.get()
+
+        def set_state(widget, state):
+            try: widget.configure(state=state)
+            except Exception: pass
+
+        # Always keep core fields editable
+        for w in (self.name_ent, self.url_ent, self.app_type_ent, self.interval_ent, self.enabled_chk, self.auth_cb):
+            set_state(w, "normal")
+
+        if auth == "none":
+            # Disable all login-related widgets
+            for w in (self.username_ent, self.password_ent, self.login_url_ent,
+                      self.form_user_field_ent, self.form_pwd_field_ent, self.login_method_cb):
+                set_state(w, "disabled")
+        elif auth == "basic":
+            # Enable user/pass, disable form-specific fields
+            for w in (self.username_ent, self.password_ent):
+                set_state(w, "normal")
+            for w in (self.login_url_ent, self.form_user_field_ent, self.form_pwd_field_ent, self.login_method_cb):
+                set_state(w, "disabled")
+        else:  # form
+            for w in (self.username_ent, self.password_ent, self.login_url_ent,
+                      self.form_user_field_ent, self.form_pwd_field_ent, self.login_method_cb):
+                set_state(w, "normal")
 
     def apply(self):
+        # Validate interval
+        try:
+            interval = int(self.interval_var.get())
+            if interval <= 0:
+                raise ValueError
+        except Exception:
+            messagebox.showerror("Validation", "Interval must be a positive integer (seconds).")
+            self.result = None
+            return
+
         data = {
             "name": self.name_var.get().strip(),
             "url": self.url_var.get().strip(),
@@ -467,13 +538,19 @@ class MonitorEditor(simpledialog.Dialog):
             "form_username_field": self.form_user_field_var.get().strip(),
             "form_password_field": self.form_pwd_field_var.get().strip(),
             "login_method": self.login_method_var.get().strip(),
-            "interval": int(self.interval_var.get()),
+            "interval": interval,
             "enabled": bool(self.enabled_var.get()),
         }
         if not data["name"] or not data["url"]:
-            messagebox.showerror("Validation", "Name and URL are required")
+            messagebox.showerror("Validation", "Name and URL are required.")
             self.result = None
             return
+        # If form auth selected, ensure login_url and fields are present
+        if data["auth_type"] == "form":
+            if not data["login_url"] or not data["form_username_field"] or not data["form_password_field"]:
+                messagebox.showerror("Validation", "For form auth, set Login URL, username field, and password field.")
+                self.result = None
+                return
         self.result = data
 
     def show(self):
