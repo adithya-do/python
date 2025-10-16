@@ -554,7 +554,7 @@ class MonitorEditor(simpledialog.Dialog):
         self.result = data
 
     def show(self):
-        self.wait_window()
+        # simpledialog.Dialog already blocks in __init__, so just return the result
         return getattr(self, "result", None)
 
 # ---- Entry point ----
