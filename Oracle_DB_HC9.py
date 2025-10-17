@@ -403,17 +403,35 @@ class MonitorApp(ttk.Frame):
 
     # Context menu & copy
     def _show_context_menu(self,event):
-        iid=self.tree.identify_row(event.y); cid=self.tree.identify_column(event.x)
-        if iid: self.tree.selection_set(iid); self._context_row=iid; self._context_col=cid; self.menu.tk_popup(event.x_root,event.y_root)
+        iid = self.tree.identify_row(event.y)
+        cid = self.tree.identify_column(event.x)
+        if iid:
+            self.tree.selection_set(iid)
+            self._context_row = iid
+            self._context_col = cid
+            self.menu.tk_popup(event.x_root, event.y_root)
+
     def _copy_cell(self):
-        row=getattr(self,"_context_row",None); colid=getattr(self,"_context_col",None)
-        if not row or not colid: return
-        col_index=int(colid.replace("#",""))-1; vals=self.tree.item(row)["values"]; text=str(vals[col_index]) if col_index<len(vals) else ""
-        self.clipboard_clear(); self.clipboard_append(text)
-    def _copy_by_col(self,colname:str):
-        sel=self.tree.selection(); if not sel: return
-        iid=sel[0]; vals=self.tree.item(iid)["values"]; idx=self.LOGICAL_COLUMNS.index(colname); text=str(vals[idx]) if idx<len(vals) else ""
-        self.clipboard_clear(); self.clipboard_append(text)
+        row = getattr(self, "_context_row", None)
+        colid = getattr(self, "_context_col", None)
+        if not row or not colid:
+            return
+        col_index = int(colid.replace("#","")) - 1
+        vals = self.tree.item(row)["values"]
+        text = str(vals[col_index]) if col_index < len(vals) else ""
+        self.clipboard_clear()
+        self.clipboard_append(text)
+
+    def _copy_by_col(self, colname: str):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        iid = sel[0]
+        vals = self.tree.item(iid)["values"]
+        idx = self.LOGICAL_COLUMNS.index(colname)
+        text = str(vals[idx]) if idx < len(vals) else ""
+        self.clipboard_clear()
+        self.clipboard_append(text)
 
     # Sorting helpers
     def _parse_sessions(self,s:str)->Tuple[int,int]:
@@ -488,12 +506,12 @@ class MonitorApp(ttk.Frame):
         status_cell=f"{mark(h.get('status','').upper()=='UP')} {h.get('status','-')}"
         inst_cell=f"{mark((h.get('inst_status','') or '').upper()=='OPEN')} {h.get('inst_status','-')}"
         sc=int(h.get('sessions_curr',0)); sl=int(h.get('sessions_limit',0) or 0)
-        sessions_cell=f\"{mark((sl==0) or (sc<0.95*sl))} {sc}/{sl}\" if sl else f\"{BAD} 0/0\"
-        worst=h.get('worst_ts_pct_used'); worst_ok=not (worst is not None and float(worst)>=90.0); worst_val='-' if worst is None else f\"{float(worst):.1f}%\"
-        worst_cell=f\"{mark(worst_ok)} {worst_val}\"
+        sessions_cell=f"{mark((sl==0) or (sc<0.95*sl))} {sc}/{sl}" if sl else f"{BAD} 0/0"
+        worst=h.get('worst_ts_pct_used'); worst_ok=not (worst is not None and float(worst)>=90.0); worst_val='-' if worst is None else f"{float(worst):.1f}%"
+        worst_cell=f"{mark(worst_ok)} {worst_val}"
         startup_str=h.get('startup_time_str','-')
-        on=int(h.get('ts_online',0) or 0); tot=int(h.get('ts_total',0) or 0); ts_cell=f\"{mark(tot==on and tot>0)} {on}/{tot}\" if tot else f\"{BAD} 0/0\"
-        db_size_cell=f\"{h.get('db_size_gb','-')} GB\" if h.get('db_size_gb') is not None else "-"
+        on=int(h.get('ts_online',0) or 0); tot=int(h.get('ts_total',0) or 0); ts_cell=f"{mark(tot==on and tot>0)} {on}/{tot}" if tot else f"{BAD} 0/0"
+        db_size_cell=f"{h.get('db_size_gb','-')} GB" if h.get('db_size_gb') is not None else "-"
         idx={c:i for i,c in enumerate(self.LOGICAL_COLUMNS)}
         vals[idx["Host"]]=h.get("host","-"); vals[idx["Status"]]=status_cell; vals[idx["Inst_status"]]=inst_cell; vals[idx["Sessions"]]=sessions_cell
         vals[idx["WorstTS%"]]=worst_cell; vals[idx["LastFull/Inc"]]=h.get("last_full_inc_backup_str",f"{BAD} -"); vals[idx["LastArch"]]=h.get("last_arch_backup_str",f"{BAD} -")
@@ -525,22 +543,22 @@ class MonitorApp(ttk.Frame):
             if len(vals)<=idx: vals+=[""]*(idx+1-len(vals))
             vals[idx]=status; self.tree.item(name,values=vals)
     def _apply_result(self,name:str,target:DbTarget,h:DbHealth):
-        status_cell=f\"{GOOD if h.status.upper()=='UP' else BAD} {h.status}\"
-        inst_cell=f\"{GOOD if (h.inst_status or '').upper()=='OPEN' else BAD} {h.inst_status or '-'}\"
+        status_cell=f"{GOOD if h.status.upper()=='UP' else BAD} {h.status}"
+        inst_cell=f"{GOOD if (h.inst_status or '').upper()=='OPEN' else BAD} {h.inst_status or '-'}"
         if h.sessions_limit and h.sessions_limit>0:
-            sess_ok=h.sessions_curr<0.95*h.sessions_limit; sessions_cell=f\"{GOOD if sess_ok else BAD} {h.sessions_curr}/{h.sessions_limit}\"
-        else: sessions_cell=f\"{BAD} 0/0\"
-        worst_ok=not (h.worst_ts_pct_used is not None and h.worst_ts_pct_used>=90.0); worst_val='-' if h.worst_ts_pct_used is None else f\"{h.worst_ts_pct_used:.1f}%\"
-        worst_cell=f\"{GOOD if worst_ok else BAD} {worst_val}\"
+            sess_ok=h.sessions_curr<0.95*h.sessions_limit; sessions_cell=f"{GOOD if sess_ok else BAD} {h.sessions_curr}/{h.sessions_limit}"
+        else: sessions_cell=f"{BAD} 0/0"
+        worst_ok=not (h.worst_ts_pct_used is not None and h.worst_ts_pct_used>=90.0); worst_val='-' if h.worst_ts_pct_used is None else f"{h.worst_ts_pct_used:.1f}%"
+        worst_cell=f"{GOOD if worst_ok else BAD} {worst_val}"
         def fmt_backup(dt:Optional[datetime],arch=False):
-            if not dt: return f\"{BAD} -\"
+            if not dt: return f"{BAD} -"
             age=(datetime.now(dt.tzinfo)-dt).total_seconds()/3600.0; ok=(age<=12) if arch else ((age/24.0)<=3)
-            return f\"{GOOD if ok else BAD} {_dt_str(dt)}\"
+            return f"{GOOD if ok else BAD} {_dt_str(dt)}"
         last_full_cell=fmt_backup(h.last_full_inc_backup,False); last_arch_cell=fmt_backup(h.last_arch_backup,True)
         startup_str=_dt_str(h.startup_time)
-        if (h.ts_total or 0)>0: ts_ok=(h.ts_online==h.ts_total); ts_cell=f\"{GOOD if ts_ok else BAD} {h.ts_online}/{h.ts_total}\"
-        else: ts_cell=f\"{BAD} 0/0\"
-        db_size_cell=f\"{h.db_size_gb:.1f} GB\" if h.db_size_gb is not None else "-"
+        if (h.ts_total or 0)>0: ts_ok=(h.ts_online==h.ts_total); ts_cell=f"{GOOD if ts_ok else BAD} {h.ts_online}/{h.ts_total}"
+        else: ts_cell=f"{BAD} 0/0"
+        db_size_cell=f"{h.db_size_gb:.1f} GB" if h.db_size_gb is not None else "-"
         vals=list(self.tree.item(name)["values"] or ["-"]*len(self.LOGICAL_COLUMNS)); idx={c:i for i,c in enumerate(self.LOGICAL_COLUMNS)}
         vals[idx["Host"]]=h.host or "-"; vals[idx["Status"]]=status_cell; vals[idx["Inst_status"]]=inst_cell; vals[idx["Sessions"]]=sessions_cell
         vals[idx["WorstTS%"]]=worst_cell; vals[idx["LastFull/Inc"]]=last_full_cell; vals[idx["LastArch"]]=last_arch_cell
@@ -570,7 +588,8 @@ class MonitorApp(ttk.Frame):
         if not t: messagebox.showerror(APP_NAME,"Target not found."); return
         DbEditor(self,target=t,on_save=self._update_target)
     def _remove_selected(self):
-        sel=self.tree.selection(); if not sel: return
+        sel=self.tree.selection();
+        if not sel: return
         name=sel[0]; self.targets=[t for t in self.targets if t.name!=name]; self.tree.delete(name); self._persist_targets(); self._renumber()
     def _add_target(self,t:DbTarget):
         if t.password and not t.password_enc: t.password_enc=_encrypt_password(t.password)
