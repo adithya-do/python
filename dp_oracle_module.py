@@ -513,6 +513,14 @@ class MonitorApp(ttk.Frame):
         ttk.Button(t1, text="Remove DB", command=self._remove_selected).pack(side=tk.LEFT)
         ttk.Button(t1, text="Import Config", command=self._import_json).pack(side=tk.LEFT, padx=(10, 0))
         ttk.Button(t1, text="Export Config", command=self._export_json).pack(side=tk.LEFT)
+        # Moved here: column customization + client lib controls
+        ttk.Separator(t1, orient="vertical").pack(side=tk.LEFT, fill=tk.Y, padx=8)
+        ttk.Button(t1, text="Customize Columns", command=self._customize_columns).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(t1, text="Select Columns", command=self._select_columns_dialog).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Label(t1, text="Client lib dir (for TNS):").pack(side=tk.LEFT, padx=(0, 4))
+        self.client_dir_var = tk.StringVar(value=self.cfg.get("client_lib_dir", ""))
+        ttk.Entry(t1, textvariable=self.client_dir_var, width=28).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(t1, text="Browse", command=self._pick_client_dir).pack(side=tk.LEFT)
 
         # Email bar
         t2 = ttk.Frame(self)
@@ -585,16 +593,7 @@ class MonitorApp(ttk.Frame):
         bottombar.grid(row=3, column=0, sticky="ew", padx=8, pady=4)
         self.status_var = tk.StringVar(value="Idle")
         ttk.Label(bottombar, textvariable=self.status_var).pack(side=tk.LEFT)
-
-        # Column customization
-        t3 = ttk.Frame(self)
-        t3.grid(row=4, column=0, sticky="ew", padx=8, pady=(0, 6))
-        ttk.Button(t3, text="Customize Columns", command=self._customize_columns).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(t3, text="Select Columns", command=self._select_columns_dialog).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Label(t3, text="Client lib dir (for TNS):").pack(side=tk.LEFT, padx=(16, 4))
-        self.client_dir_var = tk.StringVar(value=self.cfg.get("client_lib_dir", ""))
-        ttk.Entry(t3, textvariable=self.client_dir_var, width=28).pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Button(t3, text="Browse", command=self._pick_client_dir).pack(side=tk.LEFT)
+        # (moved) Column customization controls are now in the top toolbar (t1)
 
     # ---- UI Handlers ----
     def _toggle_auto(self):
