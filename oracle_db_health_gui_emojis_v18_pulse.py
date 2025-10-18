@@ -1149,6 +1149,9 @@ class RouterApp(tk.Tk):
 
     def show_oracle(self):
         if self.view_oracle is None:
+            # Ensure parent frame has a 'title' attribute so v18's MonitorApp won't error
+            if not hasattr(self.stack, 'title'):
+                self.stack.title = lambda *a, **k: None
             # Create MonitorApp inside the stack
             self.view_oracle = MonitorApp(self.stack, self.cfg)
         self._show(self.view_oracle)
