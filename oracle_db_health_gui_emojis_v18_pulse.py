@@ -1058,21 +1058,20 @@ class DbEditor(tk.Toplevel):
         self.destroy()
 
 
-# ---------------- Landing & Router (Database Pulse banner) ----------------
+# -------- Landing / Router Shell (added) --------
 class Landing(ttk.Frame):
     def __init__(self, master):
         super().__init__(master)
         self.configure(padding=20)
         center = tk.Frame(self)
         center.pack(expand=True)
-        # Icons + title
-        icon = tk.Label(center, text="🛢️  💓", font=("Segoe UI Emoji", 48))
+        # Icons: database + pulse
+        icon = tk.Label(center, text="🗄️  💓", font=("Segoe UI Emoji", 48))
         icon.pack(pady=(0, 10))
-        title = tk.Label(center, text="Database Pulse", font=("Segoe UI", 34, "bold"), fg="#1e61ff")
+        title = tk.Label(center, text="Database Pulse", font=("Segoe UI", 32, "bold"), fg="#1e61ff")
         title.pack()
         subtitle = tk.Label(center, text="A Database Health Check Tool", font=("Segoe UI", 10))
         subtitle.pack(pady=(6, 0))
-
 
 class RouterApp(tk.Tk):
     def __init__(self, cfg: Dict[str, Any]):
@@ -1085,39 +1084,39 @@ class RouterApp(tk.Tk):
         except Exception:
             pass
 
-        # Window size
-        self.geometry("2000x840")
+        self.geometry("1600x900")
         self.cfg = cfg
 
-        # Top banner (light orange) with left buttons and right brand
-        self.banner = tk.Frame(self, bg="#f9c97a")  # light orange
+        # Top banner (light orange) with left buttons + right brand
+        self.banner = tk.Frame(self, bg="#ffcc80")
         self.banner.pack(side=tk.TOP, fill=tk.X)
 
-        left = tk.Frame(self.banner, bg="#f9c97a")
-        left.pack(side=tk.LEFT, padx=6, pady=6)
-        self._nav_btns: Dict[str, tk.Button] = {}
+        left = tk.Frame(self.banner, bg="#ffcc80")
+        left.pack(side=tk.LEFT, padx=8, pady=6)
 
+        self._nav_btns: Dict[str, tk.Button] = {}
         def mkbtn(txt, key, cmd):
             b = tk.Button(
                 left, text=txt, command=lambda k=key, c=cmd: self._select_nav(k, c),
                 bg="#ffffff", fg="#000000",
                 activebackground="#d6e6ff", activeforeground="#000000",
-                font=("Segoe UI", 10),
-                padx=10, pady=4, relief=tk.RAISED, bd=1
+                font=("Segoe UI", 10), padx=12, pady=5, relief=tk.RAISED, bd=1
             )
-            b.pack(side=tk.LEFT, padx=4)
+            b.pack(side=tk.LEFT, padx=5)
             self._nav_btns[key] = b
 
-        # Buttons: Home, Oracle Database, SQL Server (future)
+        # Buttons on left
         mkbtn("Home", "home", self.show_home)
         mkbtn("Oracle Database", "oracle", self.show_oracle)
         mkbtn("SQL Server", "sql", self.show_sqlserver)
 
-        right = tk.Frame(self.banner, bg="#f9c97a")
+        # Right brand: pulse + blue text
+        right = tk.Frame(self.banner, bg="#ffcc80")
         right.pack(side=tk.RIGHT, padx=10, pady=6)
-        tk.Label(right, text="💓 Database Pulse", bg="#f9c97a", fg="#1e61ff", font=("Segoe UI", 14, "bold")).pack(side=tk.RIGHT)
+        lab = tk.Label(right, text="💓 Database Pulse", bg="#ffcc80", fg="#1e61ff", font=("Segoe UI", 14, "bold"))
+        lab.pack(side=tk.RIGHT)
 
-        # Main stack area
+        # Stacked area
         self.stack = tk.Frame(self)
         self.stack.pack(fill=tk.BOTH, expand=True)
 
@@ -1125,7 +1124,7 @@ class RouterApp(tk.Tk):
         self.view_oracle = None
         self.view_sql = None
 
-        # Default: landing page
+        # Default: Landing page
         self._select_nav("home", self.show_home)
 
     def _clear_nav_colors(self):
@@ -1135,7 +1134,7 @@ class RouterApp(tk.Tk):
     def _select_nav(self, key: str, route_call):
         self._clear_nav_colors()
         if key in self._nav_btns:
-            self._nav_btns[key].configure(bg="#6ea8fe")  # light blue selected
+            self._nav_btns[key].configure(bg="#6ea8fe")  # light blue highlight
         route_call()
 
     def _show(self, frame: tk.Frame):
@@ -1150,6 +1149,7 @@ class RouterApp(tk.Tk):
 
     def show_oracle(self):
         if self.view_oracle is None:
+            # Create MonitorApp inside the stack
             self.view_oracle = MonitorApp(self.stack, self.cfg)
         self._show(self.view_oracle)
 
@@ -1157,20 +1157,14 @@ class RouterApp(tk.Tk):
         if self.view_sql is None:
             self.view_sql = tk.Frame(self.stack)
             self.view_sql.configure(padding=20)
-            lab = tk.Label(self.view_sql, text="SQL Server Monitoring — Coming Soon", font=("Segoe UI", 20, "bold"))
-            lab.pack(expand=True)
+            tk.Label(self.view_sql, text="SQL Server Monitoring — Coming Soon", font=("Segoe UI", 20, "bold")).pack(expand=True)
         self._show(self.view_sql)
-# ---------------- Main ----------------
+
+# ---------------- Main (patched) ----------------
 def main():
     cfg = load_config()
-    root = tk.Tk()
-    try:
-        if sys.platform.startswith("win"):
-            from ctypes import windll
-            windll.shcore.SetProcessDpiAwareness(1)  # type: ignore
-    except Exception: pass
-    app = MonitorApp(root, cfg)
-    root.geometry("2000x840"); root.mainloop()
+    app = RouterApp(cfg)
+    app.mainloop()
 
 if __name__ == "__main__":
     main()
