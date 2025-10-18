@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Database Pulse — Version 2
+# Database Pulse — Version 2 (FULL)
 # UI Upgrades:
 # 1) Window icon: draw a tiny DB icon dynamically and set as title-bar icon.
 # 2) Top banner (medium orange): LEFT -> [Home] [Oracle Database] [SQL Server] buttons (bold).
@@ -207,6 +207,7 @@ def connect_target(target: DbTarget, cfg: Dict[str, Any]):
         if user and pwd: return oracledb.connect(user=user, password=pwd, dsn=tns)
         return oracledb.connect(dsn=tns)
     else:
+        # THIN: parse DSN and use keyword params (no TNS resolution ever).
         host, port, service, sid = parse_ezconnect(dsn)
         if not host:
             raise ValueError("Invalid JDBC thin DSN. Please set Host, Port and Service/SID.")
@@ -423,7 +424,7 @@ class MonitorApp(ttk.Frame):
         self.status_var = tk.StringVar(value="Idle")
         ttk.Label(bottombar, textvariable=self.status_var).pack(side=tk.LEFT)
 
-    # (remaining MonitorApp methods identical to previous build; omitted for brevity)
+    # ---------- UI handlers ----------
     def _toggle_auto(self):
         if self.auto_var.get(): self._start_auto()
         else: self._stop_auto()
@@ -516,6 +517,7 @@ class MonitorApp(ttk.Frame):
             self.cfg["email_columns"] = cols or list(self.LOGICAL_COLUMNS); save_config(self.cfg); dlg.destroy()
         ttk.Button(dlg, text="Apply", command=apply_and_close).pack(pady=8)
 
+    # ---------- Context menu ----------
     def _show_context_menu(self, event):
         iid = self.tree.identify_row(event.y); cid = self.tree.identify_column(event.x)
         if iid:
@@ -536,6 +538,7 @@ class MonitorApp(ttk.Frame):
         text = str(vals[idx]) if idx < len(vals) else ""
         self.clipboard_clear(); self.clipboard_append(text)
 
+    # ---------- Sorting helpers ----------
     def _parse_sessions(self, s: str) -> Tuple[int,int]:
         t = str(s).strip()
         if " " in t: t = t.split()[-1]
@@ -698,9 +701,161 @@ class MonitorApp(ttk.Frame):
         vals[colidx["Check status"]] = "Complete"
         vals[colidx["Error"]] = h.error or ("" if h.status == "UP" else h.details)
         self.tree.item(name, values=vals)
+        # persist last health
         self.last_health[name] = {"status": h.status,"inst_status": h.inst_status,"sessions_curr": h.sessions_curr,"sessions_limit": h.sessions_limit,"worst_ts_pct_used": h.worst_ts_pct_used,"host": h.host,"elapsed_ms": h.elapsed_ms,"version": h.version,"startup_time_str": startup_str,"ts_online": h.ts_online,"ts_total": h.ts_total,"db_size_gb": h.db_size_gb,"ts": h.ts,"error": vals[colidx["Error"]],"last_full_inc_backup_str": last_full_cell,"last_arch_backup_str": last_arch_cell}
         self.cfg["last_health"] = self.last_health; save_config(self.cfg)
         self._renumber(); self._autosize_columns()
+
+    # ---------- Clear / CRUD / Import-Export / Email ----------
+    def _clear_row_values(self, vals: List[Any]) -> List[Any]:
+        res = list(vals); colidx = {c:i for i,c in enumerate(self.LOGICAL_COLUMNS)}
+        for col in self.STATUS_COLUMNS:
+            i = colidx[col]; res[i] = 0 if col == "Ms" else "-"
+        return res
+
+    def _clear_all_rows(self):
+        for iid in self.tree.get_children(""):
+            vals = list(self.tree.item(iid)["values"]); cleared = self._clear_row_values(vals); self.tree.item(iid, values=cleared)
+        self.status_var.set("Cleared all rows (except S.No, DB Name, Environment).")
+
+    def _clear_selected_row(self):
+        sel = self.tree.selection()
+        if not sel: messagebox.showinfo(APP_NAME, "Select a row to clear."); return
+        iid = sel[0]; vals = list(self.tree.item(iid)["values"]); cleared = self._clear_row_values(vals)
+        self.tree.item(iid, values=cleared); self.status_var.set(f"Cleared row: {iid}")
+
+    def _add_dialog(self): DbEditor(self, on_save=self._add_target)
+
+    def _edit_selected(self):
+        sel = self.tree.selection()
+        if not sel: messagebox.showinfo(APP_NAME, "Select a row to edit."); return
+        name = sel[0]; t = next((x for x in self.targets if x.name == name), None)
+        if not t: messagebox.showerror(APP_NAME, "Target not found."); return
+        DbEditor(self, target=t, on_save=self._update_target)
+
+    def _remove_selected(self):
+        sel = self.tree.selection()
+        if not sel: return
+        name = sel[0]; self.targets = [t for t in self.targets if t.name != name]
+        self.tree.delete(name); self._persist_targets(); self._renumber()
+
+    def _add_target(self, t: DbTarget):
+        if any(x.name == t.name for x in self.targets):
+            messagebox.showerror(APP_NAME, "A target with this name already exists."); return
+        self.targets.append(t); self._persist_targets()
+        values = ["-"] * len(self.LOGICAL_COLUMNS); values[0] = len(self.targets); values[1] = t.name; values[2] = t.environment
+        self.tree.insert("", tk.END, iid=t.name, values=tuple(values)); self._renumber(); self._autosize_columns()
+
+    def _update_target(self, t: DbTarget):
+        found = False
+        for i, x in enumerate(self.targets):
+            if x.name == t.name: self.targets[i] = t; found = True; break
+        if not found: self.targets.append(t)
+        self._persist_targets()
+        if t.name in self.tree.get_children(""):
+            vals = list(self.tree.item(t.name)["values"]); vals[1] = t.name; vals[2] = t.environment; self.tree.item(t.name, values=vals)
+        self._autosize_columns()
+
+    def _persist_targets(self):
+        self.cfg["interval_sec"] = self.interval_var.get()
+        self.cfg["targets"] = [_serialize_target(t) for t in self.targets]
+        self.cfg["client_lib_dir"] = self.client_dir_var.get()
+        self.cfg["auto_run"] = self.auto_var.get()
+        save_config(self.cfg)
+
+    def _import_json(self):
+        p = filedialog.askopenfilename(title="Import config (.json)", filetypes=[["JSON", "*.json"]])
+        if not p: return
+        try:
+            with open(p, "r", encoding="utf-8") as f: cfg = json.load(f)
+            self.cfg.update(cfg)
+            if "email" in cfg: self.cfg["email"].update(cfg["email"] or {})
+            self.interval_var.set(int(self.cfg.get("interval_sec", DEFAULT_INTERVAL_SEC)))
+            self.client_dir_var.set(self.cfg.get("client_lib_dir", "")); self.auto_var.set(bool(self.cfg.get("auto_run", False)))
+            self.targets = [_hydrate_target(t) for t in self.cfg.get("targets", [])]; self.last_health = self.cfg.get("last_health", {})
+            order = [c for c in self.cfg.get("column_order", list(self.LOGICAL_COLUMNS)) if c in self.LOGICAL_COLUMNS]
+            if order and order[0] != "S.No": order = ["S.No"] + [c for c in order if c != "S.No"]
+            visible = [c for c in self.cfg.get("visible_columns", order) if c in self.LOGICAL_COLUMNS]
+            if visible and visible[0] != "S.No": visible = ["S.No"] + [c for c in visible if c != "S.No"]
+            self.tree["displaycolumns"] = visible
+            if "column_widths" in self.cfg:
+                for col, w in self.cfg["column_widths"].items():
+                    try: self.tree.column(col, width=int(w))
+                    except: pass
+            save_config(self.cfg); self._refresh_table_from_targets(); self._load_last_health_into_rows()
+            messagebox.showinfo(APP_NAME, "Imported configuration.")
+        except Exception as e:
+            messagebox.showerror(APP_NAME, f"Failed to import: {e}")
+
+    def _export_json(self):
+        p = filedialog.asksaveasfilename(title="Export config", defaultextension=".json", initialfile="oracle_config.json")
+        if not p: return
+        try:
+            export = {"interval_sec": self.interval_var.get(),"targets": [_serialize_target(t) for t in self.targets],"client_lib_dir": self.client_dir_var.get(),"email": {"server": self.smtp_server_var.get().strip(),"port": int(self.smtp_port_var.get() or 25),"from_addr": self.from_var.get().strip(),"to_addrs": self.to_var.get().strip(),"subject": self.cfg.get("email", {}).get("subject", "Oracle DB Health Report")},"last_health": self.last_health,"auto_run": self.auto_var.get(),"column_order": list(self.cfg.get("column_order", self.LOGICAL_COLUMNS)),"visible_columns": list(self.tree["displaycolumns"]),"email_columns": list(self.cfg.get("email_columns", self.LOGICAL_COLUMNS)),"column_widths": {c: self.tree.column(c,'width') for c in self.LOGICAL_COLUMNS}}
+            with open(p, "w", encoding="utf-8") as f: json.dump(export, f, indent=2)
+            messagebox.showinfo(APP_NAME, "Exported configuration.")
+        except Exception as e:
+            messagebox.showerror(APP_NAME, f"Failed to export: {e}")
+
+    def _save_mail_settings(self):
+        self.cfg.setdefault("email", {})
+        self.cfg["email"]["server"] = self.smtp_server_var.get().strip()
+        try: self.cfg["email"]["port"] = int(self.smtp_port_var.get() or 25)
+        except Exception: self.cfg["email"]["port"] = 25
+        self.cfg["email"]["from_addr"] = self.from_var.get().strip()
+        self.cfg["email"]["to_addrs"] = self.to_var.get().strip()
+        save_config(self.cfg); messagebox.showinfo(APP_NAME, "Mail settings saved.")
+
+    def _email_report(self):
+        email_cfg = self.cfg.get("email", {})
+        server = self.smtp_server_var.get().strip() or email_cfg.get("server", "")
+        port = int(self.smtp_port_var.get() or email_cfg.get("port", 25))
+        from_addr = self.from_var.get().strip() or email_cfg.get("from_addr", "")
+        to_addrs = self.to_var.get().strip() or email_cfg.get("to_addrs", "")
+        subject = email_cfg.get("subject", "Oracle DB Health Report")
+        if not (server and from_addr and to_addrs):
+            messagebox.showerror(APP_NAME, "Set SMTP server, From, and To addresses first."); return
+        rows = [self.tree.item(i)["values"] for i in self.tree.get_children("")]
+        html = self._build_html(rows)
+        try:
+            self._send_html_email(server, port, from_addr, [x.strip() for x in to_addrs.split(",") if x.strip()], subject, html)
+            messagebox.showinfo(APP_NAME, "Email report sent.")
+        except Exception as e:
+            messagebox.showerror(APP_NAME, f"Failed to send email: {e}")
+
+    def _build_html(self, rows: List[List]) -> str:
+        headers = [c for c in self.cfg.get("email_columns", list(self.LOGICAL_COLUMNS)) if c in self.LOGICAL_COLUMNS]
+        if not headers: headers = list(self.LOGICAL_COLUMNS)
+        def cell_style(text: str, col: str) -> str:
+            ok = None
+            if col in ("Status","Inst_status","WorstTS%","LastFull/Inc","LastArch","Sessions","TS Online"):
+                t = str(text).strip()
+                if t.startswith(GOOD): ok = True
+                elif t.startswith(BAD): ok = False
+            if col == "WorstTS%":
+                try: pct = float(str(text).split()[-1].replace("%","")); ok = pct < 90.0
+                except Exception: pass
+            if ok is True: return "background-color:#e6ffe6;color:#064b00;font-weight:bold;"
+            if ok is False: return "background-color:#ffe6e6;color:#7a0000;font-weight:bold;"
+            return ""
+        thead = "<tr>" + "".join(f"<th style='padding:6px 10px;border-bottom:1px solid #ccc;text-align:left'>{h}</th>" for h in headers) + "</tr>"
+        body_rows = []
+        for r in rows:
+            tds = []
+            for col in headers:
+                try: idx = self.LOGICAL_COLUMNS.index(col); val = r[idx]
+                except Exception: val = ""
+                style = cell_style(val, col)
+                tds.append(f"<td style='padding:4px 8px;border-bottom:1px solid #eee;{style}'>{val}</td>")
+            body_rows.append("<tr>" + "".join(tds) + "</tr>")
+        table = "<table style='border-collapse:collapse;font-family:Segoe UI,Arial,sans-serif;font-size:12px'>" + thead + "".join(body_rows) + "</table>"
+        title = f"<h3>Oracle DB Health Report — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</h3>"
+        return "<html><body>"+title+table+"</body></html>"
+
+    def _send_html_email(self, server: str, port: int, from_addr: str, to_addrs: List[str], subject: str, html: str):
+        msg = MIMEMultipart("alternative"); msg["Subject"] = subject; msg["From"] = from_addr; msg["To"] = ", ".join(to_addrs)
+        part = MIMEText(html, "html", "utf-8"); msg.attach(part)
+        with smtplib.SMTP(server, port, timeout=20) as s: s.sendmail(from_addr, to_addrs, msg.as_string())
 
 # ---------------- Landing / Router Shell ----------------
 class Landing(ttk.Frame):
@@ -776,7 +931,7 @@ class RouterApp(tk.Tk):
     def _set_window_icon(self):
         # Draw a tiny 16x16 "database cylinder" with blue body and light highlights.
         img = tk.PhotoImage(width=16, height=16)
-        # fill transparent-ish white
+        # background
         for x in range(16):
             for y in range(16):
                 img.put("#ffffff", (x, y))
