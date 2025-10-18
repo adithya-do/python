@@ -1119,6 +1119,8 @@ class RouterApp(tk.Tk):
         # Stacked area
         self.stack = tk.Frame(self)
         self.stack.pack(fill=tk.BOTH, expand=True)
+        self.stack.grid_rowconfigure(0, weight=1)
+        self.stack.grid_columnconfigure(0, weight=1)
 
         self.view_landing = Landing(self.stack)
         self.view_oracle = None
@@ -1138,27 +1140,34 @@ class RouterApp(tk.Tk):
         route_call()
 
     
+    
     def _show(self, frame: tk.Frame):
-        # Hide everything in the content stack first
+        # Use grid stacking: put each view at row=0,col=0 and raise the selected one
         for child in list(self.stack.winfo_children()):
             try:
-                child.pack_forget()
+                child.grid_forget()
             except Exception:
                 pass
             try:
-                child.grid_forget()
+                child.pack_forget()
             except Exception:
                 pass
             try:
                 child.place_forget()
             except Exception:
                 pass
-        # Now show only the requested frame
         try:
-            frame.pack_forget()  # ensure clean state before packing
+            frame.grid(row=0, column=0, sticky="nsew")
+        except Exception:
+            # if grid fails (already gridded), ensure it's placed, then raise
+            try:
+                frame.grid_configure(row=0, column=0, sticky="nsew")
+            except Exception:
+                pass
+        try:
+            frame.tkraise()
         except Exception:
             pass
-        frame.pack(fill=tk.BOTH, expand=True)
 
     def show_home(self):
         if self.view_landing is None:
