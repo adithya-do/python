@@ -1125,6 +1125,8 @@ class RouterApp(tk.Tk):
         self.view_landing = Landing(self.stack)
         # dedicated containers so we can pack inside while the stack uses grid
         self.oracle_container = tk.Frame(self.stack)
+        self.oracle_container.grid_rowconfigure(0, weight=1)
+        self.oracle_container.grid_columnconfigure(0, weight=1)
         self.sql_container = tk.Frame(self.stack)
         self.view_oracle = None
         self.view_sql = None
@@ -1186,7 +1188,10 @@ class RouterApp(tk.Tk):
                 self.oracle_container.title = lambda *a, **k: None
             if not any(isinstance(w, MonitorApp) for w in self.oracle_container.winfo_children()):
                 mon = MonitorApp(self.oracle_container, self.cfg)
-                mon.pack(fill=tk.BOTH, expand=True)
+                try:
+                    mon.grid(row=0, column=0, sticky='nsew')
+                except Exception:
+                    pass
         # grid and raise the container
         try:
             self.view_oracle.grid(row=0, column=0, sticky='nsew')
