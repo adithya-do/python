@@ -710,6 +710,53 @@ class MonitorApp(ttk.Frame):
             v = tk.BooleanVar(value=(col in current_vis))
             vars_by_col[col] = v
             ttk.Checkbutton(box, text=col, variable=v).pack(anchor="w")
+    def _select_email_columns_dialog(self):
+        """Dialog to choose which columns appear in the emailed HTML report."""
+        dlg = tk.Toplevel(self)
+        dlg.title("Select Email Columns")
+        dlg.geometry("360x520")
+        ttk.Label(dlg, text="Choose which columns to include in the email report:").pack(pady=6)
+
+        current_email_cols = list(self.cfg.get("email_columns", list(self.LOGICAL_COLUMNS)))
+        # Ensure all known columns appear in the selection list
+        all_cols = [c for c in self.LOGICAL_COLUMNS]
+        # S.No is optional in emails; keep it selectable
+        vars_by_col = {}
+        box = ttk.Frame(dlg)
+        box.pack(fill=tk.BOTH, expand=True, padx=10, pady=6)
+
+        # Add "Select All" / "Clear All" helpers
+        helper = ttk.Frame(dlg)
+        helper.pack(fill=tk.X, padx=10, pady=(0,6))
+        def set_all(state: bool):
+            for v in vars_by_col.values():
+                v.set(state)
+
+        ttk.Button(helper, text="Select All", command=lambda: set_all(True)).pack(side=tk.LEFT, padx=(0,6))
+        ttk.Button(helper, text="Clear All", command=lambda: set_all(False)).pack(side=tk.LEFT)
+
+        for col in all_cols:
+            v = tk.BooleanVar(value=(col in current_email_cols))
+            vars_by_col[col] = v
+            ttk.Checkbutton(box, text=col, variable=v).pack(anchor="w")
+
+        def apply_and_close():
+            # Keep the order consistent with current display order if possible, otherwise LOGICAL_COLUMNS
+            current_display = list(self.tree["displaycolumns"])
+            order_ref = current_display if current_display else list(self.LOGICAL_COLUMNS)
+            selected = [c for c in order_ref if vars_by_col.get(c, tk.BooleanVar(value=True)).get() and c in all_cols]
+            if not selected:
+                # Fail-safe: if user clears everything, keep at least S.No and DB Name
+                selected = [c for c in ["S.No","DB Name"] if c in all_cols]
+            self.cfg["email_columns"] = selected
+            from tkinter import messagebox
+            messagebox.showinfo(APP_NAME, f"Email columns updated ({len(selected)} selected).")
+            # Persist to config
+            save_config(self.cfg)
+            dlg.destroy()
+
+        ttk.Button(dlg, text="Apply", command=apply_and_close).pack(pady=8)
+
 
         def apply_and_close():
             order = self.cfg.get("column_order", list(self.LOGICAL_COLUMNS))
