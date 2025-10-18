@@ -1170,7 +1170,7 @@ class RouterApp(tk.Tk):
         except Exception:
             pass
 
-    def show_home(self):(self):
+    def show_home(self):
         if self.view_landing is None:
             self.view_landing = Landing(self.stack)
         try:
