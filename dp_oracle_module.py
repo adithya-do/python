@@ -696,19 +696,63 @@ class MonitorApp(ttk.Frame):
     def _select_columns_dialog(self):
         dlg = tk.Toplevel(self)
         dlg.title("Select Visible Columns")
-        dlg.geometry("360x500")
+        dlg.geometry("360x520")
         ttk.Label(dlg, text="Choose which columns to display (S.No always visible):").pack(pady=6)
-        current_vis = set(self.cfg.get("visible_columns", list(self.LOGICAL_COLUMNS)))
-        vars_by_col: Dict[str, tk.BooleanVar] = {}
+
+        # Determine current visibility
+        current_visible = list(self.tree["displaycolumns"])
+        if not current_visible:
+            current_visible = list(self.LOGICAL_COLUMNS)
+
+        # Checkbox list (skip S.No; it's always visible)
         box = ttk.Frame(dlg)
         box.pack(fill=tk.BOTH, expand=True, padx=10, pady=6)
+        vars_by_col = {}
+
+        # Helper row for select/clear all
+        helper = ttk.Frame(dlg)
+        helper.pack(fill=tk.X, padx=10, pady=(0,6))
+
+        def set_all(state: bool):
+            for col, var in vars_by_col.items():
+                var.set(state)
+
+        ttk.Button(helper, text="Select All", command=lambda: set_all(True)).pack(side=tk.LEFT, padx=(0,6))
+        ttk.Button(helper, text="Clear All", command=lambda: set_all(False)).pack(side=tk.LEFT)
+
         for col in self.LOGICAL_COLUMNS:
             if col == "S.No":
+                # pin always visible
                 ttk.Label(box, text="S.No (always visible)").pack(anchor="w")
                 continue
-            v = tk.BooleanVar(value=(col in current_vis))
+            v = tk.BooleanVar(value=(col in current_visible))
             vars_by_col[col] = v
             ttk.Checkbutton(box, text=col, variable=v).pack(anchor="w")
+
+        def apply_and_close():
+            # Respect user's last known order; ensure S.No is first
+            order = self.cfg.get("column_order", list(self.LOGICAL_COLUMNS))
+            order = [c for c in order if c in self.LOGICAL_COLUMNS]
+            if order and order[0] != "S.No":
+                order = ["S.No"] + [c for c in order if c != "S.No"]
+            # Build visible list from checkboxes
+            visible = ["S.No"] + [c for c in order if c != "S.No" and vars_by_col.get(c, tk.BooleanVar(value=True)).get()]
+            if not visible:
+                visible = ["S.No"]
+            self.tree["displaycolumns"] = visible
+            self.cfg["visible_columns"] = visible
+            # Persist and autosize
+            save_config(self.cfg)
+            try:
+                self._autosize_columns()
+            except Exception:
+                pass
+            dlg.destroy()
+
+        # Ensure there's a visible Apply button
+        ttk.Button(dlg, text="Apply", command=apply_and_close).pack(pady=8)
+
+
     def _select_email_columns_dialog(self):
         """Dialog to choose which columns appear in the emailed HTML report."""
         dlg = tk.Toplevel(self)
