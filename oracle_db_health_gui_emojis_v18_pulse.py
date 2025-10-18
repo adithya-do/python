@@ -1137,9 +1137,27 @@ class RouterApp(tk.Tk):
             self._nav_btns[key].configure(bg="#6ea8fe")  # light blue highlight
         route_call()
 
+    
     def _show(self, frame: tk.Frame):
-        for child in self.stack.winfo_children():
-            child.pack_forget()
+        # Hide everything in the content stack first
+        for child in list(self.stack.winfo_children()):
+            try:
+                child.pack_forget()
+            except Exception:
+                pass
+            try:
+                child.grid_forget()
+            except Exception:
+                pass
+            try:
+                child.place_forget()
+            except Exception:
+                pass
+        # Now show only the requested frame
+        try:
+            frame.pack_forget()  # ensure clean state before packing
+        except Exception:
+            pass
         frame.pack(fill=tk.BOTH, expand=True)
 
     def show_home(self):
