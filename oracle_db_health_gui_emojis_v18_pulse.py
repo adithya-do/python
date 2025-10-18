@@ -1123,6 +1123,9 @@ class RouterApp(tk.Tk):
         self.stack.grid_columnconfigure(0, weight=1)
 
         self.view_landing = Landing(self.stack)
+        # dedicated containers so we can pack inside while the stack uses grid
+        self.oracle_container = tk.Frame(self.stack)
+        self.sql_container = tk.Frame(self.stack)
         self.view_oracle = None
         self.view_sql = None
 
@@ -1142,7 +1145,7 @@ class RouterApp(tk.Tk):
     
     
     def _show(self, frame: tk.Frame):
-        # Use grid stacking: put each view at row=0,col=0 and raise the selected one
+        # Hide everything, then grid the target and raise
         for child in list(self.stack.winfo_children()):
             try:
                 child.grid_forget()
@@ -1159,38 +1162,52 @@ class RouterApp(tk.Tk):
         try:
             frame.grid(row=0, column=0, sticky="nsew")
         except Exception:
-            # if grid fails (already gridded), ensure it's placed, then raise
-            try:
-                frame.grid_configure(row=0, column=0, sticky="nsew")
-            except Exception:
-                pass
+            pass
         try:
             frame.tkraise()
         except Exception:
             pass
 
-    def show_home(self):
+    def show_home(self):(self):
         if self.view_landing is None:
             self.view_landing = Landing(self.stack)
+        try:
+            self.view_landing.grid(row=0, column=0, sticky='nsew')
+        except Exception:
+            pass
         self._show(self.view_landing)
 
     def show_oracle(self):
+        # Use a dedicated container inside the stack; pack MonitorApp within it
         if self.view_oracle is None:
-            # Ensure parent frame has a 'title' attribute so v18's MonitorApp won't error
-            if not hasattr(self.stack, 'title'):
-                self.stack.title = lambda *a, **k: None
-            # Create MonitorApp inside the stack
-            self.view_oracle = MonitorApp(self.stack, self.cfg)
+            self.view_oracle = self.oracle_container
+            # v18 MonitorApp expects a .title on its master; provide a no-op
+            if not hasattr(self.oracle_container, 'title'):
+                self.oracle_container.title = lambda *a, **k: None
+            if not any(isinstance(w, MonitorApp) for w in self.oracle_container.winfo_children()):
+                mon = MonitorApp(self.oracle_container, self.cfg)
+                mon.pack(fill=tk.BOTH, expand=True)
+        # grid and raise the container
+        try:
+            self.view_oracle.grid(row=0, column=0, sticky='nsew')
+        except Exception:
+            pass
         self._show(self.view_oracle)
 
     def show_sqlserver(self):
         if self.view_sql is None:
-            self.view_sql = tk.Frame(self.stack)
-            self.view_sql.configure(padding=20)
-            tk.Label(self.view_sql, text="SQL Server Monitoring — Coming Soon", font=("Segoe UI", 20, "bold")).pack(expand=True)
+            self.view_sql = self.sql_container
+            if not self.sql_container.winfo_children():
+                inner = tk.Frame(self.sql_container)
+                inner.pack(fill=tk.BOTH, expand=True)
+                tk.Label(inner, text="SQL Server Monitoring — Coming Soon", font=("Segoe UI", 20, "bold")).pack(expand=True)
+        try:
+            self.view_sql.grid(row=0, column=0, sticky='nsew')
+        except Exception:
+            pass
         self._show(self.view_sql)
 
-# ---------------- Main (patched) ----------------
+    # ---------------- Main (patched) ----------------
 def main():
     cfg = load_config()
     app = RouterApp(cfg)
