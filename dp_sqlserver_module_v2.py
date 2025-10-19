@@ -235,17 +235,18 @@ def save_config(cfg: Dict[str, Any]):
 def build_sqlcmd_command(sqlcmd_path: str, server: str, auth: str, username: Optional[str], password: Optional[str],
                          query: str, login_timeout: int = 10, query_timeout: int = 30) -> List[str]:
     exe = sqlcmd_path.strip() or "sqlcmd"
-    cmd = [exe, "-S", server, "-W", "-h", "-1", "-s", "|", "-b", "-l", str(login_timeout), "-Q", query]
+    if not server:
+        raise ValueError("Server/Instance is empty. Please set 'Server\\Instance' or 'host,port'.")
+    # Correct order: exe, -S server, then auth flags
+    cmd = [exe, "-S", server]
     if auth == "windows":
-        cmd.insert(2, "-E")
+        cmd += ["-E"]
     else:
         if not username or password is None:
             raise ValueError("SQL authentication requires username and password.")
-        cmd.insert(2, "-U")
-        cmd.insert(3, username)
-        cmd.insert(4, "-P")
-        cmd.insert(5, password)
-    cmd.extend(["-t", str(query_timeout)])
+        cmd += ["-U", username, "-P", password]
+    # Remaining flags + query + timeouts
+    cmd += ["-W", "-h", "-1", "-s", "|", "-b", "-l", str(login_timeout), "-Q", query, "-t", str(query_timeout)]
     return cmd
 
 def run_sqlcmd(cmd: List[str]) -> Tuple[int, str, str]:
@@ -376,7 +377,7 @@ class SqlServerMonitorApp(ttk.Frame):
         except Exception:
             pass
         style.configure("SS.Treeview.Heading", background="#cfe8ff", foreground="#000000",
-                        font=(self._font.actual("family"), self._font.actual("size"), "bold"))
+            font=(self._font.actual("family"), self._font.actual("size"), "bold"))
         style.map("SS.Treeview.Heading", background=[("active", "#b7dbff")])
         style.configure("SS.Treeview", rowheight=22)
 
@@ -398,7 +399,7 @@ class SqlServerMonitorApp(ttk.Frame):
         ttk.Button(t1, text="Import Config", command=self._import_json).pack(side=tk.LEFT, padx=(10,0))
         ttk.Button(t1, text="Export Config", command=self._export_json).pack(side=tk.LEFT)
 
-        # Add column customization + SQLCMD location to toolbar (beside Export)
+        # Column customization + SQLCMD location to toolbar (beside Export)
         ttk.Separator(t1, orient="vertical").pack(side=tk.LEFT, fill=tk.Y, padx=8)
         ttk.Button(t1, text="Customize Columns", command=self._customize_columns).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(t1, text="Select Columns", command=self._select_columns_dialog).pack(side=tk.LEFT, padx=(0, 10))
