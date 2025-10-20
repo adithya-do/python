@@ -2,13 +2,15 @@
 # -*- coding: utf-8 -*-
 """
 Oracle module for Database Pulse.
-Adds EXCEL-LIKE HEADER FILTERS (dropdowns with distinct values) for columns:
-DB Name, Environment, Host, DB Version, Status.
+EXCEL-LIKE HEADER FILTERS (two-list pick UI):
+- Columns supported: DB Name, Environment, Host, DB Version, Status
+- Open by right-clicking on a header
+- Left list = all distinct values; Right list = selected values (allowed)
+- Apply persists to config and updates the grid + email report rows
 
-This builds on your current module and keeps the earlier advanced
-"Filter…" dialog too. Both filter systems are AND-ed together and
-affect the Email Report (only visible rows are emailed).
+This file is a drop-in replacement for dp_oracle_module.py
 """
+
 import base64, json, os, re, smtplib, sys, threading, time, tkinter as tk
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -167,7 +169,8 @@ def default_config() -> Dict[str, Any]:
         "email_columns": cols[:],
         "column_widths": {},
         "active_filter": [],
-        "header_filters": {},  # {col:[values]}; empty list means no filter
+        # header_filters: {col: [values]} ; empty list or missing => no filter
+        "header_filters": {},
     }
 
 def _hydrate_target(d: Dict[str, Any]) -> DbTarget:
@@ -452,7 +455,7 @@ class MonitorApp(ttk.Frame):
                 return
             if col not in FILTERABLE_COLUMNS:
                 return
-            self._open_header_filter(col, event.x_root, event.y_root)
+            self._open_header_filter(col)
         else:
             iid = self.tree.identify_row(event.y)
             cid = self.tree.identify_column(event.x)
@@ -461,8 +464,8 @@ class MonitorApp(ttk.Frame):
                 self._context_row = iid; self._context_col = cid
                 self.menu.tk_popup(event.x_root, event.y_root)
 
-    # ---- Header dropdown filter ----
-    def _open_header_filter(self, col: str, x_root: int, y_root: int):
+    # ---- Header dropdown filter (two-list selection) ----
+    def _open_header_filter(self, col: str):
         idx = self.LOGICAL_COLUMNS.index(col)
         all_iids = list(self.tree.get_children("")) + list(self._detached)
         distinct = []; seen=set()
@@ -477,51 +480,91 @@ class MonitorApp(ttk.Frame):
 
         current_sel: Optional[set] = self._header_filters.get(col)
 
-        top = tk.Toplevel(self); top.wm_overrideredirect(True); top.geometry(f"+{x_root}+{y_root}")
-        frame = ttk.Frame(top, borderwidth=1, relief="solid"); frame.pack(fill=tk.BOTH, expand=True)
+        dlg = tk.Toplevel(self); dlg.title(f"Filter: {col}"); dlg.geometry("540x360"); dlg.resizable(False, False)
+        ttk.Label(dlg, text=f"Filter column: {col}").pack(padx=8, pady=(8,4), anchor="w")
 
-        ctrl = ttk.Frame(frame); ctrl.pack(fill=tk.X, padx=6, pady=4)
-        ttk.Label(ctrl, text=f"Filter: {col}").pack(side=tk.LEFT)
-        vars_map = {}
-        def set_all(state: bool):
-            for v in vars_map.values(): v.set(state)
-        ttk.Button(ctrl, text="All", command=lambda: set_all(True)).pack(side=tk.RIGHT, padx=(6,0))
-        ttk.Button(ctrl, text="None", command=lambda: set_all(False)).pack(side=tk.RIGHT)
+        body = ttk.Frame(dlg); body.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
+        left = ttk.Frame(body); left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        right = ttk.Frame(body); right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
 
-        listwrap = ttk.Frame(frame); listwrap.pack(fill=tk.BOTH, expand=True, padx=6, pady=2)
-        canvas = tk.Canvas(listwrap, width=280, height=220, borderwidth=0, highlightthickness=0)
-        vsb = ttk.Scrollbar(listwrap, orient="vertical", command=canvas.yview)
-        inner = ttk.Frame(canvas); inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0,0), window=inner, anchor="nw"); canvas.configure(yscrollcommand=vsb.set)
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True); vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        ttk.Label(left, text="Available").pack(anchor="w")
+        lb_all = tk.Listbox(left, selectmode=tk.EXTENDED, height=12)
+        lb_all.pack(fill=tk.BOTH, expand=True, padx=(0,8), pady=(2,0))
 
-        for val in distinct:
-            bvar = tk.BooleanVar(value=(True if current_sel is None else (val in current_sel)))
-            ttk.Checkbutton(inner, text=val if val else "(blank)", variable=bvar).pack(anchor="w")
-            vars_map[val] = bvar
+        for v in distinct:
+            lb_all.insert(tk.END, v if v else "(blank)")
 
-        btns = ttk.Frame(frame); btns.pack(fill=tk.X, padx=6, pady=6)
-        def apply_and_close():
-            selected = {v for v, var in vars_map.items() if var.get()}
-            if len(selected) == len(vars_map):
+        btns = ttk.Frame(body); btns.pack(side=tk.LEFT, fill=tk.Y, padx=6)
+        def move(src: tk.Listbox, dst: tk.Listbox):
+            items = [src.get(i) for i in src.curselection()]
+            existing = set(dst.get(0, tk.END))
+            for it in items:
+                if it not in existing:
+                    dst.insert(tk.END, it)
+            # keep available list intact; we don't remove from left so user can multi-add
+
+        ttk.Button(btns, text=">>", command=lambda: move(lb_all, lb_sel)).pack(pady=6)
+        def remove_selected():
+            sel = list(lb_sel.curselection()); sel.reverse()
+            for i in sel:
+                lb_sel.delete(i)
+        ttk.Button(btns, text="<<", command=remove_selected).pack(pady=6)
+
+        ttk.Label(right, text="Selected (will be shown)").pack(anchor="w")
+        lb_sel = tk.Listbox(right, selectmode=tk.EXTENDED, height=12)
+        lb_sel.pack(fill=tk.BOTH, expand=True, pady=(2,0))
+
+        # preload current selection if any
+        if current_sel is not None:
+            for v in distinct:
+                disp = v if v else "(blank)"
+                if v in current_sel:
+                    lb_sel.insert(tk.END, disp)
+
+        footer = ttk.Frame(dlg); footer.pack(fill=tk.X, padx=8, pady=8)
+        def select_all():
+            lb_sel.delete(0, tk.END)
+            for v in distinct:
+                lb_sel.insert(tk.END, v if v else "(blank)")
+
+        def clear_all():
+            lb_sel.delete(0, tk.END)
+
+        def apply_now():
+            selected = list(lb_sel.get(0, tk.END))
+            # map "(blank)" back to ""
+            selected = [("" if v == "(blank)" else v) for v in selected]
+            if len(selected) == 0:
+                # empty selection means show none (strict)
+                self._header_filters[col] = set()
+            elif len(selected) == len(distinct):
+                # all = no filter
                 self._header_filters[col] = None
             else:
-                self._header_filters[col] = selected
+                self._header_filters[col] = set(selected)
+            # persist + apply
             self.cfg["header_filters"] = {k: (sorted(list(v)) if v else []) for k,v in self._header_filters.items() if k in FILTERABLE_COLUMNS}
             save_config(self.cfg)
-            self._refresh_heading_labels(); self._apply_all_filters(); top.destroy()
-        def cancel(): top.destroy()
-        ttk.Button(btns, text="Cancel", command=cancel).pack(side=tk.RIGHT, padx=(6,0))
-        ttk.Button(btns, text="Apply", command=apply_and_close).pack(side=tk.RIGHT)
+            self._refresh_heading_labels(); self._apply_all_filters(); dlg.destroy()
 
-        top.focus_force(); top.bind("<FocusOut>", lambda e: top.destroy()); top.bind("<Escape>", lambda e: top.destroy())
+        ttk.Button(footer, text="Select All", command=select_all).pack(side=tk.LEFT)
+        ttk.Button(footer, text="Clear", command=clear_all).pack(side=tk.LEFT, padx=(6,0))
+        ttk.Button(footer, text="Cancel", command=dlg.destroy).pack(side=tk.RIGHT, padx=(6,0))
+        ttk.Button(footer, text="Apply", command=apply_now).pack(side=tk.RIGHT)
+
+        dlg.transient(self); dlg.grab_set(); dlg.wait_window()
 
     def _refresh_heading_labels(self):
         for col in self.LOGICAL_COLUMNS:
             if col in FILTERABLE_COLUMNS:
                 suffix = " ▼"
                 sel = self._header_filters.get(col)
-                if sel not in (None, set(), {}): suffix = " ▼•"
+                if isinstance(sel, set) and len(sel) >= 0:
+                    # active if not None (including empty set = show none)
+                    if sel is not None:
+                        suffix = " ▼•"
+                elif sel is not None:
+                    suffix = " ▼•"
                 self.tree.heading(col, text=col + suffix, command=lambda c=col: self._sort_by_column(c, False))
             else:
                 self.tree.heading(col, text=col, command=lambda c=col: self._sort_by_column(c, False))
@@ -559,11 +602,15 @@ class MonitorApp(ttk.Frame):
         colidx = {c:i for i,c in enumerate(self.LOGICAL_COLUMNS)}
         for col, selected in self._header_filters.items():
             if col not in FILTERABLE_COLUMNS: continue
-            if selected is None: continue
+            if selected is None: continue  # no filter
             i = colidx.get(col)
             if i is None or i>=len(values): return False
             val = str(values[i])
-            if val not in selected: return False
+            # empty set => show none
+            if isinstance(selected, set) and len(selected) == 0:
+                return False
+            if isinstance(selected, set) and val not in selected:
+                return False
         return True
 
     def _apply_all_filters(self):
